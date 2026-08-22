@@ -39,6 +39,21 @@ RECENT_ACTIVITY_COUNT = int(_env_or_default("RECENT_ACTIVITY_COUNT", "25"))
 HISTORY_START_YEAR = int(_env_or_default("HISTORY_START_YEAR", "2018"))
 MAX_WEEK = 18  # NFL regular season + small buffer
 
+# Sleeper's public API does NOT expose real/legal names anywhere — only
+# 'username' and 'display_name' (both user-chosen handles). There is no
+# first_name/last_name/real_name field to fall back on like ESPN has, so
+# showing actual manager names is only possible with a manual mapping.
+# Fill this in with your league members' real names, keyed by their
+# Sleeper username OR user_id (either works; username is usually easier to
+# read here). Anyone not listed will fall back to their display name.
+#   MANAGER_NAME_OVERRIDES = {
+#       "jsouzzz": "Jake Souza",
+#       "some_other_username": "Jane Doe",
+#   }
+MANAGER_NAME_OVERRIDES = {
+    # "username_or_user_id": "Real Name",
+}
+
 
 # --------------------------------------------------------------------------- #
 #  API ACCESS LAYER  (the only part that is Sleeper-specific)
@@ -55,25 +70,38 @@ def avatar_url(avatar_id):
 
 
 def manager_name(u):
-    """Best-effort real name for a Sleeper user. Prefers the user's real
-    first/last name (top-level 'real_name', or metadata first_name +
-    last_name) so co-managers show as 'Jake Souza' rather than a username
-    like 'jsouzzz'. Falls back to display_name/username only if the user
-    never set a real name on Sleeper."""
+    """Best-effort real name for a Sleeper user.
+
+    Sleeper's API doesn't provide real names at all (only username and
+    display_name — both self-chosen handles), so this checks
+    MANAGER_NAME_OVERRIDES first. It also checks a couple of unofficial
+    fields ('real_name', metadata first_name/last_name) in case a future
+    API version or a specific league happens to populate them, but for most
+    leagues those will be empty and this will fall through to the override
+    map, and finally to display_name/username if nothing is configured."""
     if not isinstance(u, dict):
         return None
-    # 1) Top-level real_name (full name, when the user filled it in)
+
+    username = (u.get("username") or "").strip()
+    user_id = (u.get("user_id") or "").strip()
+    if username in MANAGER_NAME_OVERRIDES:
+        return MANAGER_NAME_OVERRIDES[username]
+    if user_id in MANAGER_NAME_OVERRIDES:
+        return MANAGER_NAME_OVERRIDES[user_id]
+
+    # Unofficial/undocumented fields — populated for essentially no one on
+    # Sleeper today, but harmless to check in case that ever changes.
     real = (u.get("real_name") or "").strip()
     if real:
         return real
-    # 2) metadata first_name + last_name
     meta = u.get("metadata") or {}
     first = (meta.get("first_name") or "").strip()
     last = (meta.get("last_name") or "").strip()
     combined = f"{first} {last}".strip()
     if combined:
         return combined
-    # 3) Fallback to display name / username (the chosen handle)
+
+    # Fallback: display name / username (the chosen handle)
     return (u.get("display_name") or u.get("username") or "").strip() or None
 
 
@@ -261,7 +289,14 @@ def fetch_history(current_league_id, current_season, start_year):
 def build_model():
     state = api("/state/nfl")
     season = int(state.get("season") or datetime.utcnow().year)
-    display_week = int(state.get("display_week") or state.get("week") or 1)
+    # Sleeper's "week" is the actual current NFL week (matches real games
+    # being played). "display_week" is a separate UI-navigation hint Sleeper
+    # uses on its own site, and it intentionally jumps ahead early in the
+    # week (often right after Monday Night Football) — using it here made
+    # the Matchups tab show next week's number before that week's games had
+    # even happened. Prefer the real "week" value; fall back to
+    # display_week only if "week" is missing for some reason.
+    current_week = int(state.get("week") or state.get("display_week") or 1)
     lg = api(f"/league/{LEAGUE_ID}")
     league_name = lg.get("name") or "Sleeper League"
 
@@ -285,7 +320,7 @@ def build_model():
     # ---- matchups (current week) ----
     matchups = []
     try:
-        mu = api(f"/league/{LEAGUE_ID}/matchups/{display_week}") or []
+        mu = api(f"/league/{LEAGUE_ID}/matchups/{current_week}") or []
     except Exception:
         mu = []
     by_matchup = {}
@@ -374,7 +409,7 @@ def build_model():
 
     # ---- recent activity ----
     activity = []
-    for w in range(max(1, display_week - 4), display_week + 1):
+    for w in range(max(1, current_week - 4), current_week + 1):
         try:
             txs = api(f"/league/{LEAGUE_ID}/transactions/{w}") or []
         except Exception:
@@ -452,7 +487,7 @@ def build_model():
 
     return {
         "league_name": league_name, "platform": "Sleeper", "season": season,
-        "current_week": display_week,
+        "current_week": current_week,
         "standings": standings, "matchups": matchups, "power": power, "luck": luck,
         "activity": activity, "draft": draft, "history": hist,
     }
@@ -462,19 +497,19 @@ def matchup_outlook(fav, dog, gap):
     seed = sum(ord(c) for c in (fav + dog))
     close = [f"This one's a coin flip. {fav} holds the slimmest of edges over {dog}, projected to win by just {gap} points.",
              f"{fav} and {dog} are neck and neck, separated by only {gap} projected points.",
-             f"Too close to call. {fav} edges {dog} by {gap} points â one big play could flip it."]
+             f"Too close to call. {fav} edges {dog} by {gap} points — one big play could flip it."]
     moderate = [f"{fav} enters as the favorite over {dog}, projected to win by about {gap} points.",
                 f"On paper {fav} has the edge, out-projecting {dog} by {gap} points.",
                 f"{fav} looks like the safer bet against {dog} this week, favored by roughly {gap} points."]
     blowout = [f"{fav} is projected to run away with it, out-scoring {dog} by a lopsided {gap} points.",
-               f"This has blowout potential â {fav} is favored by {gap} points over {dog}.",
+               f"This has blowout potential — {fav} is favored by {gap} points over {dog}.",
                f"The numbers aren't kind to {dog}, with {fav} projected to win by {gap} points."]
     pool = close if gap < 8 else (moderate if gap < 20 else blowout)
     return pool[seed % len(pool)]
 
 
 # --------------------------------------------------------------------------- #
-#  RENDERER  (identical across platforms â only consumes `model`)
+#  RENDERER  (identical across platforms — only consumes `model`)
 # --------------------------------------------------------------------------- #
 def esc(s):
     return html.escape("" if s is None else str(s))
@@ -562,7 +597,7 @@ def render_matchups(mup):
 
 
 def render_power(power):
-    if not power: return "<p class='empty'>No completed weeks yet â power rankings need game data.</p>"
+    if not power: return "<p class='empty'>No completed weeks yet — power rankings need game data.</p>"
     rows = []
     for p in power:
         d = p['delta']
@@ -572,7 +607,7 @@ def render_power(power):
 
 
 def render_luck(luck):
-    if not luck: return "<p class='empty'>No completed weeks yet â luck index needs game data.</p>"
+    if not luck: return "<p class='empty'>No completed weeks yet — luck index needs game data.</p>"
     rows = []
     for l in luck:
         cls = "luck-good" if l['luck'] > 0 else ("luck-bad" if l['luck'] < 0 else "")
@@ -597,7 +632,7 @@ def render_draft(draft):
         for s in slots:
             p = grid.get((rnd, s))
             if p:
-                cells += f"<td><div class='team-name-main'>{esc(p['player'])}</div><div class='owner-name'>{esc(p['pos'])} Â· {esc(p['team'])}</div></td>"
+                cells += f"<td><div class='team-name-main'>{esc(p['player'])}</div><div class='owner-name'>{esc(p['pos'])} · {esc(p['team'])}</div></td>"
             else:
                 cells += "<td></td>"
         body.append(f"<tr>{cells}</tr>")
@@ -654,8 +689,8 @@ def render(model):
     tabs = "".join(f"<button class='tab{' active' if i==0 else ''}' onclick=\"showTab('{pid}',this)\">{label}</button>" for i, (pid, label, _) in enumerate(panels))
     body = "".join(f"<div id='{pid}' class='panel{' active' if i==0 else ''}'>{html}</div>" for i, (pid, _, html) in enumerate(panels))
     return f"""<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>{esc(model['league_name'])} Â· {esc(model['platform'])} Dashboard</title><style>{CSS}</style></head>
-<body><h1>{esc(model['league_name'])}</h1><div class="subtitle">{esc(model['platform'])} Fantasy Football Â· {model['season']} season Â· auto-updated daily</div>
+<title>{esc(model['league_name'])} · {esc(model['platform'])} Dashboard</title><style>{CSS}</style></head>
+<body><h1>{esc(model['league_name'])}</h1><div class="subtitle">{esc(model['platform'])} Fantasy Football · {model['season']} season · auto-updated daily</div>
 <div class="tabs">{tabs}</div>{body}<script>{JS}</script></body></html>"""
 
 
