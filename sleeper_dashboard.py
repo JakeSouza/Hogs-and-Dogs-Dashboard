@@ -217,24 +217,96 @@ def streak_from_outcomes(seq):
     return (label, n)
 
 
-def champion(league_id, ordered):
+def champion_and_runnerup(league_id, ordered, playoff_week_start):
+    """
+    Identifies the season's champion and runner-up from the winners
+    bracket, and best-effort looks up the actual championship-game score.
+    Falls back to (#1 seed, None, None) if the bracket data isn't
+    available or hasn't finished (e.g. mid-season).
+    """
     try:
         br = api(f"/league/{league_id}/winners_bracket") or []
     except Exception:
         br = []
+    champ = ordered[0] if ordered else None
+    runnerup = None
+    score = None
     if br:
         decided = [m for m in br if m.get("w") is not None]
         if decided:
             final = max(decided, key=lambda m: m.get("r", 0))
-            win_rid = final["w"]
+            win_rid, lose_rid = final.get("w"), final.get("l")
             for t in ordered:
                 if t["roster_id"] == win_rid:
-                    return t
-    return ordered[0] if ordered else None
+                    champ = t
+                if lose_rid is not None and t["roster_id"] == lose_rid:
+                    runnerup = t
+            if lose_rid is not None and playoff_week_start:
+                champ_week = playoff_week_start + int(final.get("r", 1)) - 1
+                score = _fetch_championship_score(league_id, champ_week, win_rid, lose_rid)
+    return champ, runnerup, score
+
+
+def _fetch_championship_score(league_id, week, win_rid, lose_rid):
+    """Best-effort final score of the championship game; None if it can't be found."""
+    try:
+        mu = api(f"/league/{league_id}/matchups/{week}") or []
+    except Exception:
+        return None
+    pts = {}
+    for t in mu:
+        rid = t.get("roster_id")
+        if rid in (win_rid, lose_rid):
+            p = t.get("custom_points")
+            if p is None:
+                p = t.get("points")
+            if p is not None:
+                pts[rid] = round(float(p), 1)
+    if win_rid in pts and lose_rid in pts:
+        return pts[win_rid], pts[lose_rid]
+    return None
+
+
+def _update_streak(state, team_id, outcome, year, week, name, owner):
+    """
+    Rolling win/loss streak tracker keyed by team identity (roster_id).
+    Call once per completed game in ASCENDING year order so streaks
+    correctly carry across a season boundary. A tie breaks both a win and
+    a loss streak. Tracks the best win streak and best loss streak seen
+    so far, each with the year/week span it covers.
+    """
+    s = state.setdefault(team_id, {
+        "current_type": None, "current_len": 0, "current_start": None,
+        "best_win": None, "best_loss": None,
+    })
+    if outcome == "T":
+        s["current_type"], s["current_len"], s["current_start"] = None, 0, None
+        return
+    if outcome == s["current_type"]:
+        s["current_len"] += 1
+    else:
+        s["current_type"] = outcome
+        s["current_len"] = 1
+        s["current_start"] = (year, week)
+    entry = {
+        "length": s["current_len"], "name": name, "owner": owner,
+        "start_year": s["current_start"][0], "start_week": s["current_start"][1],
+        "end_year": year, "end_week": week,
+    }
+    key = "best_win" if outcome == "W" else "best_loss"
+    if s[key] is None or entry["length"] > s[key]["length"]:
+        s[key] = entry
 
 
 def fetch_history(current_league_id, current_season, start_year):
     champions, season_standings, all_time, rivalries = [], {}, {}, {}
+    records = {
+        "highest_score": None, "lowest_score": None, "biggest_blowout": None,
+        "closest_game": None, "most_points_loss": None,
+    }
+    streak_state = {}
+    season_snapshots = []  # collected newest-first; replayed ascending for streaks
+
     league_id, season = current_league_id, current_season
     while league_id and int(season) >= start_year:
         try:
@@ -247,10 +319,18 @@ def fetch_history(current_league_id, current_season, start_year):
             "rank": i + 1, "name": t["team_name"], "owner": t.get("owner"),
             "wins": t["wins"], "losses": t["losses"], "ties": t["ties"], "pf": t["fpts"],
         } for i, t in enumerate(ordered)]
-        ch = champion(league_id, ordered)
-        if ch:
-            champions.append({"year": int(season), "name": ch["team_name"], "owner": ch.get("owner")})
+        playoff_week_start = (lg.get("settings") or {}).get("playoff_week_start")
+        champ, runnerup, champ_score = champion_and_runnerup(league_id, ordered, playoff_week_start)
+        if champ:
+            champions.append({
+                "year": int(season), "name": champ["team_name"], "owner": champ.get("owner"),
+                "runnerup_name": runnerup["team_name"] if runnerup else None,
+                "runnerup_owner": runnerup.get("owner") if runnerup else None,
+                "record": f"{champ['wins']}-{champ['losses']}" + (f"-{champ['ties']}" if champ.get("ties") else ""),
+                "score": champ_score,
+            })
         scores, pairs, _ = weekly_results(league_id, MAX_WEEK)
+        season_snapshots.append({"season": int(season), "teams": teams, "scores": scores, "pairs": pairs})
         for w, plist in pairs.items():
             for a, b in plist:
                 sa, sb = scores.get(a, {}).get(w), scores.get(b, {}).get(w)
@@ -280,7 +360,55 @@ def fetch_history(current_league_id, current_season, start_year):
     for e in all_time.values():
         g = e["wins"] + e["losses"] + e["ties"]
         e["win_pct"] = (e["wins"] + 0.5 * e["ties"]) / g if g else 0
-    return champions, season_standings, all_time, rivalries
+
+    # Records book: replay every season's games in ASCENDING year order
+    # (season_snapshots was built newest-first while walking previous_league_id
+    # backward) so win/loss streaks correctly carry across season boundaries.
+    for snap in reversed(season_snapshots):
+        year, teams, scores, pairs = snap["season"], snap["teams"], snap["scores"], snap["pairs"]
+        for w in sorted(pairs.keys()):
+            for a, b in pairs[w]:
+                sa, sb = scores.get(a, {}).get(w), scores.get(b, {}).get(w)
+                if sa is None or sb is None:
+                    continue
+                ta, tb = teams.get(a, {}), teams.get(b, {})
+                name_a, owner_a = ta.get("team_name", f"Team {a}"), ta.get("owner")
+                name_b, owner_b = tb.get("team_name", f"Team {b}"), tb.get("owner")
+                outcome_a = "W" if sa > sb else ("L" if sb > sa else "T")
+                outcome_b = "W" if sb > sa else ("L" if sa > sb else "T")
+
+                _update_streak(streak_state, a, outcome_a, year, w, name_a, owner_a)
+                _update_streak(streak_state, b, outcome_b, year, w, name_b, owner_b)
+
+                for rid, nm, ow, sc, oc in ((a, name_a, owner_a, sa, outcome_a), (b, name_b, owner_b, sb, outcome_b)):
+                    if records["highest_score"] is None or sc > records["highest_score"]["value"]:
+                        records["highest_score"] = {"value": sc, "name": nm, "owner": ow, "year": year, "week": w}
+                    if records["lowest_score"] is None or sc < records["lowest_score"]["value"]:
+                        records["lowest_score"] = {"value": sc, "name": nm, "owner": ow, "year": year, "week": w}
+                    if oc == "L" and (records["most_points_loss"] is None or sc > records["most_points_loss"]["value"]):
+                        records["most_points_loss"] = {"value": sc, "name": nm, "owner": ow, "year": year, "week": w}
+
+                margin = round(abs(sa - sb), 1)
+                if sa >= sb:
+                    game = {"margin": margin, "winner": name_a, "winner_owner": owner_a, "loser": name_b, "loser_owner": owner_b,
+                            "winner_score": sa, "loser_score": sb, "year": year, "week": w, "tie": sa == sb}
+                else:
+                    game = {"margin": margin, "winner": name_b, "winner_owner": owner_b, "loser": name_a, "loser_owner": owner_a,
+                            "winner_score": sb, "loser_score": sa, "year": year, "week": w, "tie": False}
+                if records["biggest_blowout"] is None or margin > records["biggest_blowout"]["margin"]:
+                    records["biggest_blowout"] = game
+                if records["closest_game"] is None or margin < records["closest_game"]["margin"]:
+                    records["closest_game"] = game
+
+    for s in streak_state.values():
+        if s["best_win"] and (records.get("longest_win_streak") is None or s["best_win"]["length"] > records["longest_win_streak"]["length"]):
+            records["longest_win_streak"] = s["best_win"]
+        if s["best_loss"] and (records.get("longest_loss_streak") is None or s["best_loss"]["length"] > records["longest_loss_streak"]["length"]):
+            records["longest_loss_streak"] = s["best_loss"]
+    records.setdefault("longest_win_streak", None)
+    records.setdefault("longest_loss_streak", None)
+
+    return champions, season_standings, all_time, rivalries, records
 
 
 # --------------------------------------------------------------------------- #
@@ -299,6 +427,9 @@ def build_model():
     current_week = int(state.get("week") or state.get("display_week") or 1)
     lg = api(f"/league/{LEAGUE_ID}")
     league_name = lg.get("name") or "Sleeper League"
+    lg_settings = lg.get("settings") or {}
+    playoff_spots = lg_settings.get("playoff_teams") or 0
+    reg_season_weeks = max(0, (lg_settings.get("playoff_week_start") or 0) - 1)
 
     teams = build_teams(LEAGUE_ID)
     scores, pairs, outcomes = weekly_results(LEAGUE_ID, MAX_WEEK)
@@ -466,12 +597,13 @@ def build_model():
         draft = None
 
     # ---- history ----
-    champions, season_standings, all_time, rivalries = fetch_history(LEAGUE_ID, season, HISTORY_START_YEAR)
+    champions, season_standings, all_time, rivalries, records = fetch_history(LEAGUE_ID, season, HISTORY_START_YEAR)
     hist = {
         "champions": champions,
         "season_standings": season_standings,
         "all_time": sorted(all_time.values(), key=lambda e: (-e["win_pct"], -e["pf"])),
         "rivalries": [],
+        "records": records,
     }
     name_by_id = {t["roster_id"]: t["team_name"] for t in teams.values()}
     ranked = sorted(rivalries.items(), key=lambda kv: -kv[1]["meetings"])[:8]
@@ -490,6 +622,7 @@ def build_model():
         "current_week": current_week,
         "standings": standings, "matchups": matchups, "power": power, "luck": luck,
         "activity": activity, "draft": draft, "history": hist,
+        "playoff_spots": playoff_spots, "reg_season_weeks": reg_season_weeks,
     }
 
 
@@ -561,6 +694,48 @@ td{padding:9px 10px;border-bottom:1px solid #1f2740}
 .draft-grid{overflow-x:auto}
 .draft-grid table{font-size:.78rem}
 .draft-grid td,.draft-grid th{border:1px solid #1f2740;padding:5px 6px;min-width:90px;vertical-align:top}
+
+/* ---------- Trophy Case ---------- */
+.trophy-wall{display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:14px}
+.trophy-card{background:#1a2138;border:1px solid #2a3348;border-radius:10px;padding:18px 16px;text-align:center}
+.trophy-year{color:#f59e0b;font-weight:800;font-size:.82rem;letter-spacing:.5px;margin-bottom:6px}
+.trophy-icon{font-size:1.6rem;margin-bottom:8px}
+.trophy-card .team-name-main{font-size:.88rem}
+.trophy-record{color:#8a92a8;font-size:.78rem;margin:6px 0 4px 0}
+.trophy-score{font-weight:700;font-size:.92rem;color:#3b82f6;margin-top:6px}
+.trophy-vs{color:#8a92a8;font-size:.72rem;margin-top:4px}
+
+/* ---------- League Records Book ---------- */
+.record-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:14px}
+.record-card{background:#1a2138;border:1px solid #2a3348;border-radius:10px;padding:16px}
+.record-label{color:#8a92a8;font-size:.75rem;text-transform:uppercase;letter-spacing:.5px;margin-bottom:8px}
+.record-value{font-size:1.4rem;font-weight:800;color:#e6e9f0;margin-bottom:8px}
+.record-unit{font-size:.75rem;font-weight:600;color:#8a92a8}
+.record-card .team-name-main{font-size:.88rem}
+.record-context{color:#8a92a8;font-size:.72rem;margin-top:6px;line-height:1.4}
+
+/* ---------- Playoff Picture ---------- */
+.playoff-grid{display:grid;grid-template-columns:1fr 1fr;gap:20px}
+.playoff-col-title{font-size:.82rem;color:#8a92a8;text-transform:uppercase;letter-spacing:.5px;margin:0 0 10px 0}
+.playoff-row{display:grid;grid-template-columns:24px 1fr auto auto auto;align-items:center;gap:10px;background:#1a2138;border:1px solid #2a3348;border-radius:8px;padding:10px 12px;margin-bottom:8px}
+.playoff-seed{color:#8a92a8;font-weight:700;font-size:.82rem}
+.playoff-record{font-size:.82rem;font-weight:600;white-space:nowrap}
+.playoff-detail{color:#8a92a8;font-size:.72rem;white-space:nowrap}
+.playoff-badge{font-size:.7rem;font-weight:700;padding:4px 9px;border-radius:20px;white-space:nowrap}
+.badge-clinched{background:rgba(74,222,128,.2);color:#4ade80}
+.badge-hunt{background:rgba(59,130,246,.2);color:#3b82f6}
+.badge-bubble{background:rgba(245,158,11,.2);color:#f59e0b}
+.badge-eliminated{background:rgba(248,113,113,.2);color:#f87171}
+@media (max-width:640px){
+  .trophy-wall,.record-grid{grid-template-columns:1fr}
+  .playoff-grid{grid-template-columns:1fr}
+  .playoff-row{grid-template-columns:20px 1fr;grid-template-areas:"seed team" "record record" "detail detail" "badge badge";row-gap:4px}
+  .playoff-seed{grid-area:seed}
+  .playoff-row .team-cell{grid-area:team}
+  .playoff-record{grid-area:record}
+  .playoff-detail{grid-area:detail}
+  .playoff-badge{grid-area:badge;justify-self:start}
+}
 """
 
 JS = """
@@ -582,6 +757,81 @@ def standings_table(rows, with_pa=True, with_streak=True):
         if with_streak: cells += f"<td>{esc(r.get('streak','-'))}</td>"
         body.append(f"<tr>{cells}</tr>")
     return f"<table><thead>{head}</thead><tbody>{''.join(body)}</tbody></table>"
+
+
+def compute_playoff_picture(standings, playoff_spots, reg_season_weeks):
+    """
+    Approximates the current playoff picture from live standings math —
+    see the ESPN dashboard's compute_playoff_picture for the full
+    rationale. Clinch/elimination calls are conservative: a team is only
+    marked Clinched or Eliminated when the math is airtight regardless of
+    who wins which remaining games. Seeding follows the same win-loss-PF
+    order as the Standings table; Sleeper's own tiebreakers may differ
+    slightly.
+    """
+    if not playoff_spots or not reg_season_weeks or not standings:
+        return None
+    entries = []
+    for s in standings:
+        games_played = s["wins"] + s["losses"] + s.get("ties", 0)
+        remaining = max(0, reg_season_weeks - games_played)
+        entries.append(dict(s, remaining=remaining, max_possible_wins=s["wins"] + remaining))
+
+    in_the_hunt = entries[:playoff_spots]
+    outside = entries[playoff_spots:]
+    last_in = in_the_hunt[-1] if in_the_hunt else None
+
+    for e in in_the_hunt:
+        e["clinched"] = bool(outside) and all(e["wins"] > o["max_possible_wins"] for o in outside)
+        e["status"] = "Clinched" if e["clinched"] else "In the hunt"
+    for e in outside:
+        e["eliminated"] = last_in is not None and e["max_possible_wins"] < last_in["wins"]
+        e["status"] = "Eliminated" if e["eliminated"] else "On the bubble"
+        e["games_back"] = round(((last_in["wins"] - e["wins"]) + (e["losses"] - last_in["losses"])) / 2, 1) if last_in else 0
+
+    return {
+        "playoff_spots": playoff_spots,
+        "in_the_hunt": in_the_hunt,
+        "outside": outside,
+        "season_over": all(e["remaining"] == 0 for e in entries),
+    }
+
+
+def render_playoff_picture(picture):
+    if not picture:
+        return "<p class='empty'>Playoff settings unavailable for this league.</p>"
+
+    def row(e, badge_class):
+        rec = f"{e['wins']}-{e['losses']}" + (f"-{e['ties']}" if e.get('ties') else "")
+        detail = "Season complete" if e["remaining"] == 0 else f"{e['remaining']} games left"
+        return f"""<div class='playoff-row'><div class='playoff-seed'>{e['rank']}</div>
+          <div class='team-cell'>{team_cell(e['name'], e.get('owner'), e.get('logo'))}</div>
+          <div class='playoff-record'>{rec}</div><div class='playoff-detail'>{detail}</div>
+          <div class='playoff-badge {badge_class}'>{e['status']}</div></div>"""
+
+    in_rows = "".join(row(e, "badge-clinched" if e["clinched"] else "badge-hunt") for e in picture["in_the_hunt"])
+    out_rows = "".join(
+        row(e, "badge-eliminated" if e["eliminated"] else "badge-bubble") for e in picture["outside"]
+    ) or "<p class='empty'>Every team in the league makes the playoffs.</p>"
+
+    note = "The regular season has wrapped — this reflects the final playoff field." if picture["season_over"] else \
+        "Updates automatically as more of the regular season completes."
+
+    return f"""<p class='section-note'>Top {picture['playoff_spots']} make the playoffs. {note}</p>
+    <div class='playoff-grid'>
+      <div class='playoff-col'><h3 class='playoff-col-title'>In the Playoffs</h3>{in_rows}</div>
+      <div class='playoff-col'><h3 class='playoff-col-title'>On the Outside</h3>{out_rows}</div>
+    </div>"""
+
+
+def render_standings_section(model):
+    picture = compute_playoff_picture(model["standings"], model["playoff_spots"], model["reg_season_weeks"])
+    sub_nav = "<button class='subtab active' onclick=\"showSubTab('std-current',this)\">Current</button>" \
+              "<button class='subtab' onclick=\"showSubTab('std-playoffs',this)\">Playoff Picture</button>"
+    return (f"<div class='subtabs'>{sub_nav}</div>"
+            f"<div id='std-current' class='subpanel active'>{standings_table(model['standings'])}</div>"
+            f"<div id='std-playoffs' class='subpanel'>{render_playoff_picture(picture)}</div>")
+
 
 
 def render_matchups(mup):
@@ -639,20 +889,101 @@ def render_draft(draft):
     return f"<div class='draft-grid'><table><thead>{head}</thead><tbody>{''.join(body)}</tbody></table></div>"
 
 
+def _streak_span_label(entry):
+    if entry["start_year"] == entry["end_year"]:
+        if entry["start_week"] == entry["end_week"]:
+            return f"Week {entry['start_week']}, {entry['start_year']}"
+        return f"Weeks {entry['start_week']}\u2013{entry['end_week']}, {entry['start_year']}"
+    return f"{entry['start_year']} Wk{entry['start_week']} \u2013 {entry['end_year']} Wk{entry['end_week']}"
+
+
+def render_trophy_case(champions):
+    if not champions:
+        return "<h2 class='section-title'>Hall of Fame &middot; Trophy Case</h2><p class='section-note'>No completed prior seasons found yet.</p>"
+    cards = []
+    for c in champions:
+        score = c.get("score")
+        matchup_line = ""
+        if c.get("runnerup_name"):
+            if score:
+                cs, rs = score
+                matchup_line = f"<div class='trophy-score'>{cs:.1f} &ndash; {rs:.1f} <span class='trophy-vs'>vs {esc(c['runnerup_name'])}</span></div>"
+            else:
+                matchup_line = f"<div class='trophy-vs'>def. {esc(c['runnerup_name'])}</div>"
+        cards.append(f"""<div class='trophy-card'><div class='trophy-year'>{c['year']}</div>
+          <div class='trophy-icon'>&#127942;</div>
+          {team_cell(c['name'], c.get('owner'))}
+          <div class='trophy-record'>{esc(c.get('record',''))}</div>
+          {matchup_line}</div>""")
+    return f"<h2 class='section-title'>Hall of Fame &middot; Trophy Case</h2><p class='section-note'>Every champion from every season fetched, in one wall.</p><div class='trophy-wall'>{''.join(cards)}</div>"
+
+
+def render_records_book(records):
+    if not records or not records.get("highest_score"):
+        return "<h2 class='section-title' style='margin-top:24px'>League Records Book</h2><p class='section-note'>Not enough historical data yet to compute records.</p>"
+
+    cards = []
+    hs = records["highest_score"]
+    cards.append(f"""<div class='record-card'><div class='record-label'>&#128293; Highest Single-Week Score</div>
+      <div class='record-value'>{hs['value']:.1f}</div>{team_cell(hs['name'], hs.get('owner'))}
+      <div class='record-context'>Week {hs['week']}, {hs['year']}</div></div>""")
+
+    ls = records["lowest_score"]
+    cards.append(f"""<div class='record-card'><div class='record-label'>&#128703; Toilet Bowl (Lowest Score)</div>
+      <div class='record-value'>{ls['value']:.1f}</div>{team_cell(ls['name'], ls.get('owner'))}
+      <div class='record-context'>Week {ls['week']}, {ls['year']}</div></div>""")
+
+    bo = records.get("biggest_blowout")
+    if bo:
+        cards.append(f"""<div class='record-card'><div class='record-label'>&#128165; Biggest Blowout</div>
+          <div class='record-value'>{bo['margin']:.1f} <span class='record-unit'>pt margin</span></div>
+          {team_cell(bo['winner'], bo.get('winner_owner'))}
+          <div class='record-context'>beat {esc(bo['loser'])} {bo['winner_score']:.1f}&ndash;{bo['loser_score']:.1f} &middot; Week {bo['week']}, {bo['year']}</div></div>""")
+
+    cg = records.get("closest_game")
+    if cg:
+        tie_note = " (Tie)" if cg.get("tie") else ""
+        verb = "tied" if cg.get("tie") else "edged"
+        cards.append(f"""<div class='record-card'><div class='record-label'>&#127919; Closest Game{tie_note}</div>
+          <div class='record-value'>{cg['margin']:.1f} <span class='record-unit'>pt margin</span></div>
+          {team_cell(cg['winner'], cg.get('winner_owner'))}
+          <div class='record-context'>{verb} {esc(cg['loser'])} {cg['winner_score']:.1f}&ndash;{cg['loser_score']:.1f} &middot; Week {cg['week']}, {cg['year']}</div></div>""")
+
+    ws = records.get("longest_win_streak")
+    if ws:
+        cards.append(f"""<div class='record-card'><div class='record-label'>&#128200; Longest Win Streak</div>
+          <div class='record-value'>{ws['length']} <span class='record-unit'>games</span></div>
+          {team_cell(ws['name'], ws.get('owner'))}
+          <div class='record-context'>{_streak_span_label(ws)}</div></div>""")
+
+    lsk = records.get("longest_loss_streak")
+    if lsk:
+        cards.append(f"""<div class='record-card'><div class='record-label'>&#128201; Longest Losing Streak</div>
+          <div class='record-value'>{lsk['length']} <span class='record-unit'>games</span></div>
+          {team_cell(lsk['name'], lsk.get('owner'))}
+          <div class='record-context'>{_streak_span_label(lsk)}</div></div>""")
+
+    mpl = records.get("most_points_loss")
+    if mpl:
+        cards.append(f"""<div class='record-card'><div class='record-label'>&#128148; Most Points in a Loss</div>
+          <div class='record-value'>{mpl['value']:.1f}</div>{team_cell(mpl['name'], mpl.get('owner'))}
+          <div class='record-context'>Week {mpl['week']}, {mpl['year']}</div></div>""")
+
+    return f"<h2 class='section-title' style='margin-top:24px'>League Records Book</h2><p class='section-note'>All-time records across every season fetched. Pure trivia &mdash; bragging rights only.</p><div class='record-grid'>{''.join(cards)}</div>"
+
+
 def render_history(hist, current_season):
-    champs = hist['champions']
-    if champs:
-        crows = [f"<tr><td>{c['year']}</td><td class='team-cell'>{team_cell(c['name'], c.get('owner'))}</td></tr>" for c in champs]
-        champ_html = f"<h2 class='section-title'>League Champions</h2><table><thead><tr><th>Season</th><th>Champion</th></tr></thead><tbody>{''.join(crows)}</tbody></table>"
-    else:
-        champ_html = "<h2 class='section-title'>League Champions</h2><p class='section-note'>No completed prior seasons found yet.</p>"
+    champ_html = render_trophy_case(hist['champions'])
+    records_html = render_records_book(hist.get('records'))
     sub_nav, panels = [], []
     seasons = sorted(hist['season_standings'].keys(), reverse=True)
     for i, year in enumerate(seasons):
         tab_id = f"std-{year}"
         sub_nav.append(f"<button class='subtab{' active' if i==0 else ''}' onclick=\"showSubTab('{tab_id}',this)\">{year}</button>")
-        with_pa = (year != current_season)
-        panels.append(f"<div id='{tab_id}' class='subpanel{' active' if i==0 else ''}'>{standings_table(hist['season_standings'][year], with_pa=with_pa, with_streak=False)}</div>")
+        # season_standings entries (from fetch_history) never carry a "pa" key —
+        # points-against isn't tracked there for any season — so this panel
+        # never requests that column.
+        panels.append(f"<div id='{tab_id}' class='subpanel{' active' if i==0 else ''}'>{standings_table(hist['season_standings'][year], with_pa=False, with_streak=False)}</div>")
     seasons_html = ""
     if seasons:
         seasons_html = f"<h2 class='section-title' style='margin-top:24px'>Season Standings</h2><div class='subtabs'>{''.join(sub_nav)}</div>{''.join(panels)}"
@@ -672,13 +1003,12 @@ def render_history(hist, current_season):
               <div class='vs'>vs</div>
               <div class='matchup-team'><div class='team-name-main'>{esc(r['name_b'])}</div><div class='team-record'>{r['wins_b']}-{r['wins_a']}</div><div class='owner-name'>{r['pts_b']} pts</div></div></div></div>""")
         riv_html = f"<h2 class='section-title' style='margin-top:24px'>Rivalry Tracker</h2><p class='section-note'>All-time head-to-head across every season fetched.</p><div class='rivalry-grid'>{''.join(cards)}</div>"
-    return champ_html + seasons_html + at_html + riv_html
+    return champ_html + records_html + seasons_html + at_html + riv_html
 
 
 def render(model):
-    s = model['standings']
     panels = [
-        ("standings", "Standings", standings_table(s)),
+        ("standings", "Standings", render_standings_section(model)),
         ("matchups", f"Matchups (Week {model['current_week']})", render_matchups(model['matchups'])),
         ("power", "Power Rankings", render_power(model['power'])),
         ("luck", "Luck Index", render_luck(model['luck'])),
