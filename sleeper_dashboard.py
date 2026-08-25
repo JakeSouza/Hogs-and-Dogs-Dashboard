@@ -667,14 +667,14 @@ h1{font-size:1.6rem;margin-bottom:4px}
 /* ---------- Hero / title banner ---------- */
 .hero{position:relative;overflow:hidden;border-radius:18px;border:1px solid #2a3348;padding:40px 32px;margin-bottom:28px;background:linear-gradient(180deg,#121a30 0%,#161d30 100%)}
 .hero-glow{position:absolute;inset:-40%;background:
-    radial-gradient(circle at 20% 20%,rgba(255,107,53,0.28),transparent 45%),
-    radial-gradient(circle at 80% 30%,rgba(168,85,247,0.24),transparent 45%),
-    radial-gradient(circle at 50% 90%,rgba(79,141,255,0.22),transparent 50%);
+    radial-gradient(circle at 20% 20%,rgba(34,197,94,0.28),transparent 45%),
+    radial-gradient(circle at 80% 30%,rgba(45,212,191,0.24),transparent 45%),
+    radial-gradient(circle at 50% 90%,rgba(59,130,246,0.24),transparent 50%);
   filter:blur(10px);pointer-events:none}
 .hero-content{position:relative;z-index:1}
 .hero-eyebrow{color:#8a92a8;font-size:12px;font-weight:700;letter-spacing:1.5px;text-transform:uppercase;margin-bottom:10px}
 .hero-title{margin:0 0 18px 0;font-size:42px;font-weight:800;letter-spacing:-1px;line-height:1.1;
-  background:linear-gradient(90deg,#ffffff 0%,#cfd8f5 60%,#a855f7 130%);
+  background:linear-gradient(90deg,#ffffff 0%,#cfd8f5 55%,#22c55e 130%);
   -webkit-background-clip:text;background-clip:text;color:transparent}
 .hero-meta{display:flex;flex-wrap:wrap;gap:8px}
 .hero-chip{display:inline-flex;align-items:center;gap:6px;padding:6px 14px;border-radius:999px;font-size:13px;font-weight:600;background:rgba(255,255,255,0.06);border:1px solid rgba(255,255,255,0.1);color:#e6e9f0;backdrop-filter:blur(4px)}
@@ -723,7 +723,7 @@ td{padding:9px 10px;border-bottom:1px solid #1f2740}
 /* ---------- Trophy Case ---------- */
 .trophy-wall{display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:14px}
 .trophy-card{background:#1a2138;border:1px solid #2a3348;border-radius:10px;padding:18px 16px;text-align:center}
-.trophy-year{color:#f59e0b;font-weight:800;font-size:.82rem;letter-spacing:.5px;margin-bottom:6px}
+.trophy-year{color:#2dd4bf;font-weight:800;font-size:.82rem;letter-spacing:.5px;margin-bottom:6px}
 .trophy-icon{font-size:1.6rem;margin-bottom:8px}
 .trophy-card .team-name-main{font-size:.88rem}
 .trophy-record{color:#8a92a8;font-size:.78rem;margin:6px 0 4px 0}
@@ -749,7 +749,7 @@ td{padding:9px 10px;border-bottom:1px solid #1f2740}
 .playoff-badge{font-size:.7rem;font-weight:700;padding:4px 9px;border-radius:20px;white-space:nowrap}
 .badge-clinched{background:rgba(74,222,128,.2);color:#4ade80}
 .badge-hunt{background:rgba(59,130,246,.2);color:#3b82f6}
-.badge-bubble{background:rgba(245,158,11,.2);color:#f59e0b}
+.badge-bubble{background:rgba(45,212,191,.2);color:#2dd4bf}
 .badge-eliminated{background:rgba(248,113,113,.2);color:#f87171}
 @media (max-width:640px){
   .trophy-wall,.record-grid{grid-template-columns:1fr}
