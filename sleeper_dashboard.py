@@ -321,7 +321,11 @@ def fetch_history(current_league_id, current_season, start_year):
         } for i, t in enumerate(ordered)]
         playoff_week_start = (lg.get("settings") or {}).get("playoff_week_start")
         champ, runnerup, champ_score = champion_and_runnerup(league_id, ordered, playoff_week_start)
-        if champ:
+        # Only record a champion for seasons that have actually finished — the
+        # in-progress current season has no winners_bracket result yet, and
+        # champion_and_runnerup() falls back to the #1 standings seed in that
+        # case, which would incorrectly crown whoever's leading mid-season.
+        if champ and int(season) != int(current_season):
             champions.append({
                 "year": int(season), "name": champ["team_name"], "owner": champ.get("owner"),
                 "runnerup_name": runnerup["team_name"] if runnerup else None,
@@ -659,6 +663,27 @@ CSS = """
 body{font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;background:#0f1424;color:#e6e9f0;padding:24px}
 h1{font-size:1.6rem;margin-bottom:4px}
 .subtitle{color:#8a92a8;margin-bottom:20px;font-size:.95rem}
+
+/* ---------- Hero / title banner ---------- */
+.hero{position:relative;overflow:hidden;border-radius:18px;border:1px solid #2a3348;padding:40px 32px;margin-bottom:28px;background:linear-gradient(180deg,#121a30 0%,#161d30 100%)}
+.hero-glow{position:absolute;inset:-40%;background:
+    radial-gradient(circle at 20% 20%,rgba(255,107,53,0.28),transparent 45%),
+    radial-gradient(circle at 80% 30%,rgba(168,85,247,0.24),transparent 45%),
+    radial-gradient(circle at 50% 90%,rgba(79,141,255,0.22),transparent 50%);
+  filter:blur(10px);pointer-events:none}
+.hero-content{position:relative;z-index:1}
+.hero-eyebrow{color:#8a92a8;font-size:12px;font-weight:700;letter-spacing:1.5px;text-transform:uppercase;margin-bottom:10px}
+.hero-title{margin:0 0 18px 0;font-size:42px;font-weight:800;letter-spacing:-1px;line-height:1.1;
+  background:linear-gradient(90deg,#ffffff 0%,#cfd8f5 60%,#a855f7 130%);
+  -webkit-background-clip:text;background-clip:text;color:transparent}
+.hero-meta{display:flex;flex-wrap:wrap;gap:8px}
+.hero-chip{display:inline-flex;align-items:center;gap:6px;padding:6px 14px;border-radius:999px;font-size:13px;font-weight:600;background:rgba(255,255,255,0.06);border:1px solid rgba(255,255,255,0.1);color:#e6e9f0;backdrop-filter:blur(4px)}
+.hero-chip-muted{color:#8a92a8;font-weight:400;background:transparent;border-color:#2a3348}
+@media (max-width:640px){
+  .hero{padding:24px 18px;border-radius:14px;margin-bottom:18px}
+  .hero-title{font-size:28px}
+  .hero-chip{font-size:12px;padding:5px 11px}
+}
 .tabs{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:18px}
 .tab{background:#1a2138;border:1px solid #2a3348;color:#c2c8d8;padding:9px 16px;border-radius:8px;cursor:pointer;font-size:.9rem}
 .tab.active{background:#3b82f6;color:#fff;border-color:#3b82f6}
@@ -975,18 +1000,6 @@ def render_records_book(records):
 def render_history(hist, current_season):
     champ_html = render_trophy_case(hist['champions'])
     records_html = render_records_book(hist.get('records'))
-    sub_nav, panels = [], []
-    seasons = sorted(hist['season_standings'].keys(), reverse=True)
-    for i, year in enumerate(seasons):
-        tab_id = f"std-{year}"
-        sub_nav.append(f"<button class='subtab{' active' if i==0 else ''}' onclick=\"showSubTab('{tab_id}',this)\">{year}</button>")
-        # season_standings entries (from fetch_history) never carry a "pa" key —
-        # points-against isn't tracked there for any season — so this panel
-        # never requests that column.
-        panels.append(f"<div id='{tab_id}' class='subpanel{' active' if i==0 else ''}'>{standings_table(hist['season_standings'][year], with_pa=False, with_streak=False)}</div>")
-    seasons_html = ""
-    if seasons:
-        seasons_html = f"<h2 class='section-title' style='margin-top:24px'>Season Standings</h2><div class='subtabs'>{''.join(sub_nav)}</div>{''.join(panels)}"
     at_html = ""
     if hist['all_time']:
         at_rows = []
@@ -1003,13 +1016,13 @@ def render_history(hist, current_season):
               <div class='vs'>vs</div>
               <div class='matchup-team'><div class='team-name-main'>{esc(r['name_b'])}</div><div class='team-record'>{r['wins_b']}-{r['wins_a']}</div><div class='owner-name'>{r['pts_b']} pts</div></div></div></div>""")
         riv_html = f"<h2 class='section-title' style='margin-top:24px'>Rivalry Tracker</h2><p class='section-note'>All-time head-to-head across every season fetched.</p><div class='rivalry-grid'>{''.join(cards)}</div>"
-    return champ_html + records_html + seasons_html + at_html + riv_html
+    return champ_html + records_html + at_html + riv_html
 
 
 def render(model):
     panels = [
         ("standings", "Standings", render_standings_section(model)),
-        ("matchups", f"Matchups (Week {model['current_week']})", render_matchups(model['matchups'])),
+        ("matchups", "Matchups", render_matchups(model['matchups'])),
         ("power", "Power Rankings", render_power(model['power'])),
         ("luck", "Luck Index", render_luck(model['luck'])),
         ("activity", "Recent Activity", render_activity(model['activity'])),
@@ -1018,9 +1031,27 @@ def render(model):
     ]
     tabs = "".join(f"<button class='tab{' active' if i==0 else ''}' onclick=\"showTab('{pid}',this)\">{label}</button>" for i, (pid, label, _) in enumerate(panels))
     body = "".join(f"<div id='{pid}' class='panel{' active' if i==0 else ''}'>{html}</div>" for i, (pid, _, html) in enumerate(panels))
+
+    team_count = len(model['standings'])
+    leader_name = model['standings'][0]['name'] if model['standings'] else "TBD"
+    updated = datetime.now().strftime("%b %d, %Y %I:%M %p")
+    hero = f"""<header class="hero">
+  <div class="hero-glow"></div>
+  <div class="hero-content">
+    <div class="hero-eyebrow">Fantasy Football &middot; {model['season']} Season</div>
+    <h1 class="hero-title">{esc(model['league_name'])}</h1>
+    <div class="hero-meta">
+      <span class="hero-chip">Week {model['current_week']}</span>
+      <span class="hero-chip">{team_count} Teams</span>
+      <span class="hero-chip">&#127942; {esc(leader_name)}</span>
+      <span class="hero-chip hero-chip-muted">Updated {updated}</span>
+    </div>
+  </div>
+</header>"""
+
     return f"""<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>{esc(model['league_name'])} · {esc(model['platform'])} Dashboard</title><style>{CSS}</style></head>
-<body><h1>{esc(model['league_name'])}</h1><div class="subtitle">{esc(model['platform'])} Fantasy Football · {model['season']} season · auto-updated daily</div>
+<body>{hero}
 <div class="tabs">{tabs}</div>{body}<script>{JS}</script></body></html>"""
 
 
