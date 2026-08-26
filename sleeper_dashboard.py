@@ -39,6 +39,30 @@ RECENT_ACTIVITY_COUNT = int(_env_or_default("RECENT_ACTIVITY_COUNT", "25"))
 HISTORY_START_YEAR = int(_env_or_default("HISTORY_START_YEAR", "2018"))
 MAX_WEEK = 18  # NFL regular season + small buffer
 
+# Number of rounds in this league's rookie-only draft. Used to build the
+# future Draft Capital board when there's no upcoming draft object yet to
+# read the round count from (falls back to the most recent draft's round
+# count automatically when one is available).
+ROOKIE_DRAFT_ROUNDS = int(_env_or_default("ROOKIE_DRAFT_ROUNDS", "4"))
+# How many future seasons of rookie picks to show on the Draft Capital board.
+DRAFT_CAPITAL_YEARS_AHEAD = int(_env_or_default("DRAFT_CAPITAL_YEARS_AHEAD", "3"))
+
+# Weekly parlay tracking (1 leg submitted per manager, 12 legs total) lives
+# entirely outside Sleeper's data model — there is no odds/betting endpoint
+# in the public API — so it's sourced from a small, manually-maintained JSON
+# file instead. See load_parlay_weeks() below for the expected file shape.
+PARLAY_FILE = _env_or_default("PARLAY_FILE", "parlay.json")
+
+# Superlatives tracked over the course of the season that determine next
+# year's rookie draft order (e.g. "Best Waiver Wire GM", "Least Points Left
+# on Bench"). Left empty until this league's specific definitions are
+# provided — fill in as they're finalized:
+#   SUPERLATIVES = [
+#       {"name": "Bench Tragedy", "description": "Most points stranded on the bench in a single loss",
+#        "leader": "Team Name", "value": "42.3 pts"},
+#   ]
+SUPERLATIVES = []
+
 # Sleeper's public API does NOT expose real/legal names anywhere — only
 # 'username' and 'display_name' (both user-chosen handles). There is no
 # first_name/last_name/real_name field to fall back on like ESPN has, so
@@ -129,6 +153,23 @@ def player_display(pid):
     return str(pid)
 
 
+def player_age(pid):
+    """Age in whole years from Sleeper's player birth_date, or None if unknown
+    (common for D/ST entries and some rookies not yet fully populated)."""
+    p = get_players().get(str(pid))
+    if not p:
+        return None
+    bd = p.get("birth_date")
+    if not bd:
+        return None
+    try:
+        y, m, d = [int(x) for x in bd.split("-")]
+    except Exception:
+        return None
+    today = datetime.utcnow().date()
+    return today.year - y - ((today.month, today.day) < (m, d))
+
+
 def build_teams(league_id):
     rosters = api(f"/league/{league_id}/rosters")
     users = api(f"/league/{league_id}/users")
@@ -165,13 +206,17 @@ def build_teams(league_id):
             "fpts": fpts,
             "fpts_against": fpts_against,
             "avatar": avatar_url(u.get("avatar")),
+            "players": r.get("players") or [],
         }
     return teams
 
 
 def weekly_results(league_id, max_week):
-    """Return scores {rid:{week:pts}}, pairs {week:[(a,b)]}, outcomes {rid:[W/L/T...]}."""
-    scores, pairs, outcomes = {}, {}, {}
+    """Return scores {rid:{week:pts}}, pairs {week:[(a,b)]}, outcomes {rid:[W/L/T...]},
+    and starter_pts {week:{rid:{player_id:pts}}} (starters only — bench points
+    don't count toward a team's score, so they're excluded from head-to-head
+    "top scorer" calculations that use this)."""
+    scores, pairs, outcomes, starter_pts = {}, {}, {}, {}
     for w in range(1, max_week + 1):
         try:
             mu = api(f"/league/{league_id}/matchups/{w}")
@@ -190,6 +235,9 @@ def weekly_results(league_id, max_week):
             pts = float(pts)
             scores.setdefault(rid, {})[w] = pts
             by_matchup.setdefault(t.get("matchup_id"), []).append((rid, pts))
+            starters = t.get("starters") or []
+            pp = t.get("players_points") or {}
+            starter_pts.setdefault(w, {})[rid] = {pid: (pp.get(pid) or 0) for pid in starters if pid and pid != "0"}
         for lst in by_matchup.values():
             if len(lst) == 2:
                 (a, sa), (b, sb) = lst
@@ -200,7 +248,7 @@ def weekly_results(league_id, max_week):
                     outcomes.setdefault(b, []).append("W"); outcomes.setdefault(a, []).append("L")
                 else:
                     outcomes.setdefault(a, []).append("T"); outcomes.setdefault(b, []).append("T")
-    return scores, pairs, outcomes
+    return scores, pairs, outcomes, starter_pts
 
 
 def streak_from_outcomes(seq):
@@ -333,7 +381,7 @@ def fetch_history(current_league_id, current_season, start_year):
                 "record": f"{champ['wins']}-{champ['losses']}" + (f"-{champ['ties']}" if champ.get("ties") else ""),
                 "score": champ_score,
             })
-        scores, pairs, _ = weekly_results(league_id, MAX_WEEK)
+        scores, pairs, _, starter_pts = weekly_results(league_id, MAX_WEEK)
         season_snapshots.append({"season": int(season), "teams": teams, "scores": scores, "pairs": pairs})
         for w, plist in pairs.items():
             for a, b in plist:
@@ -341,7 +389,7 @@ def fetch_history(current_league_id, current_season, start_year):
                 if sa is None or sb is None:
                     continue
                 key = frozenset({a, b})
-                h2h = rivalries.setdefault(key, {"meetings": 0, "wins": {}, "points": {}})
+                h2h = rivalries.setdefault(key, {"meetings": 0, "wins": {}, "points": {}, "games": [], "player_pts": {}})
                 h2h["meetings"] += 1
                 h2h["wins"].setdefault(a, 0); h2h["wins"].setdefault(b, 0)
                 h2h["points"].setdefault(a, 0.0); h2h["points"].setdefault(b, 0.0)
@@ -349,6 +397,12 @@ def fetch_history(current_league_id, current_season, start_year):
                 elif sb > sa: h2h["wins"][b] += 1
                 else: h2h["wins"][a] += 0.5; h2h["wins"][b] += 0.5
                 h2h["points"][a] += sa; h2h["points"][b] += sb
+                h2h["games"].append({"season": int(season), "week": w, "a": a, "b": b, "a_score": sa, "b_score": sb})
+                wk_starter_pts = starter_pts.get(w, {})
+                for rid in (a, b):
+                    bucket = h2h["player_pts"].setdefault(rid, {})
+                    for pid, pts in wk_starter_pts.get(rid, {}).items():
+                        bucket[pid] = bucket.get(pid, 0) + (pts or 0)
         for t in teams.values():
             e = all_time.setdefault(t["roster_id"], {
                 "name": t["team_name"], "owner": None, "wins": 0, "losses": 0,
@@ -415,6 +469,328 @@ def fetch_history(current_league_id, current_season, start_year):
     return champions, season_standings, all_time, rivalries, records
 
 
+def fetch_transaction_history(current_league_id, current_season, start_year):
+    """
+    Walks the dynasty league_id chain (same previous_league_id pattern as
+    fetch_history, run as a separate pass since it needs different endpoints
+    per season — every week's transactions plus that season's draft picks).
+    Produces two things:
+
+      - acquisition: {(roster_id, player_id str): {"season","week","method"}}
+        the MOST RECENT acquisition event for each player currently useful
+        for computing tenure. "method" is one of "Startup Draft",
+        "Rookie Draft", "Trade", "Waiver", "Free Agent".
+      - trade_log: every completed trade across the tracked seasons, newest
+        first, with the full multi-team player+pick package each side
+        received (dynasty trades routinely include future picks, not just
+        players, so this captures both).
+
+    This fetches every week of every historical season (transactions aren't
+    available in bulk), so it's noticeably heavier than fetch_history — fine
+    for a script meant to run periodically (e.g. a daily GitHub Action), not
+    meant to be called on every page load.
+    """
+    acquisition = {}
+    trade_log = []
+    league_id, season = current_league_id, current_season
+    while league_id and int(season) >= start_year:
+        try:
+            lg = api(f"/league/{league_id}")
+        except Exception:
+            break
+        season_int = int(season)
+        teams = build_teams(league_id)
+        is_startup = not lg.get("previous_league_id")  # true genesis season of this dynasty chain
+
+        try:
+            drafts = api(f"/league/{league_id}/drafts") or []
+        except Exception:
+            drafts = []
+        for d in drafts:
+            try:
+                picks = api(f"/draft/{d['draft_id']}/picks") or []
+            except Exception:
+                picks = []
+            for p in picks:
+                rid, pid = p.get("roster_id"), p.get("player_id")
+                if rid is None or pid is None:
+                    continue
+                key = (rid, str(pid))
+                ev = {"season": season_int, "week": 0, "method": "Startup Draft" if is_startup else "Rookie Draft"}
+                prev = acquisition.get(key)
+                if prev is None or (ev["season"], ev["week"]) >= (prev["season"], prev["week"]):
+                    acquisition[key] = ev
+
+        for w in range(1, MAX_WEEK + 1):
+            try:
+                txs = api(f"/league/{league_id}/transactions/{w}") or []
+            except Exception:
+                txs = []
+            for tx in txs:
+                if tx.get("status") != "complete":
+                    continue
+                ttype = tx.get("type", "")
+                adds = tx.get("adds") or {}
+                drops = tx.get("drops") or {}
+                ts = tx.get("status_updated") or tx.get("created") or 0
+
+                if ttype == "trade":
+                    roster_ids = tx.get("roster_ids") or []
+                    pkg = {rid: {"players_in": [], "players_out": [], "picks_in": []} for rid in roster_ids}
+                    for pid, rid in adds.items():
+                        pkg.setdefault(rid, {"players_in": [], "players_out": [], "picks_in": []})
+                        pkg[rid]["players_in"].append(player_display(pid))
+                    for pid, rid in drops.items():
+                        pkg.setdefault(rid, {"players_in": [], "players_out": [], "picks_in": []})
+                        pkg[rid]["players_out"].append(player_display(pid))
+                    for dp in (tx.get("draft_picks") or []):
+                        owner = dp.get("owner_id")
+                        pkg.setdefault(owner, {"players_in": [], "players_out": [], "picks_in": []})
+                        orig_name = teams.get(dp.get("roster_id"), {}).get("team_name", "?")
+                        pkg[owner]["picks_in"].append(f"{dp.get('season')} Rd {dp.get('round')} (orig. {orig_name})")
+                    date_str = datetime.utcfromtimestamp(ts / 1000).strftime("%b %d, %Y") if ts else ""
+                    trade_log.append({
+                        "date": date_str, "ts": ts, "season": season_int, "week": w,
+                        "teams": [{
+                            "name": teams.get(rid, {}).get("team_name", f"Team {rid}"),
+                            "gets": pkg.get(rid, {}).get("players_in", []) + pkg.get(rid, {}).get("picks_in", []),
+                            "gives": pkg.get(rid, {}).get("players_out", []),
+                        } for rid in roster_ids],
+                    })
+                    for pid, rid in adds.items():
+                        key = (rid, str(pid))
+                        ev = {"season": season_int, "week": w, "method": "Trade"}
+                        prev = acquisition.get(key)
+                        if prev is None or (ev["season"], ev["week"]) >= (prev["season"], prev["week"]):
+                            acquisition[key] = ev
+                else:
+                    label = "Waiver" if ttype == "waiver" else "Free Agent"
+                    for pid, rid in adds.items():
+                        key = (rid, str(pid))
+                        ev = {"season": season_int, "week": w, "method": label}
+                        prev = acquisition.get(key)
+                        if prev is None or (ev["season"], ev["week"]) >= (prev["season"], prev["week"]):
+                            acquisition[key] = ev
+
+        prev_league = lg.get("previous_league_id")
+        if not prev_league or prev_league == league_id:
+            break
+        league_id, season = prev_league, int(season) - 1
+
+    trade_log.sort(key=lambda t: -t.get("ts", 0))
+    for t in trade_log:
+        t.pop("ts", None)
+    return acquisition, trade_log
+
+
+def compute_roster_ages(teams):
+    """Average/oldest/youngest age per team from each roster's full player pool
+    (bench + IR included, since dynasty rosters carry stashes that matter)."""
+    rows = []
+    for t in teams.values():
+        ages = []
+        for pid in t.get("players", []):
+            a = player_age(pid)
+            if a is not None:
+                ages.append((a, player_display(pid)))
+        if not ages:
+            continue
+        avg_age = sum(a for a, _ in ages) / len(ages)
+        oldest = max(ages, key=lambda x: x[0])
+        youngest = min(ages, key=lambda x: x[0])
+        rows.append({
+            "name": t["team_name"], "owner": t.get("owner"), "logo": t.get("avatar"),
+            "avg_age": round(avg_age, 1), "counted": len(ages),
+            "oldest_name": oldest[1], "oldest_age": oldest[0],
+            "youngest_name": youngest[1], "youngest_age": youngest[0],
+        })
+    rows.sort(key=lambda r: r["avg_age"])
+    return rows
+
+
+def compute_player_tenure(teams, acquisition, current_season):
+    """
+    How long each currently-rostered player has been on their team, using
+    the most recent acquisition event found by fetch_transaction_history.
+    Players with no event at all predate the tracked history window (they
+    were already rostered at HISTORY_START_YEAR) — tenure for those is a
+    labeled lower bound, not exact.
+    """
+    rows = []
+    for t in teams.values():
+        for pid in t.get("players", []):
+            ev = acquisition.get((t["roster_id"], str(pid)))
+            p = get_players().get(str(pid)) or {}
+            if ev:
+                seasons = max(current_season - ev["season"] + 1, 1)
+                if ev["method"] in ("Startup Draft", "Rookie Draft"):
+                    label = f"{ev['method']}, {ev['season']}"
+                else:
+                    label = f"{ev['method']}, Wk {ev['week']} {ev['season']}"
+                approx = False
+            else:
+                seasons = max(current_season - HISTORY_START_YEAR + 1, 1)
+                label = f"On roster since {HISTORY_START_YEAR} or earlier"
+                approx = True
+            rows.append({
+                "team": t["team_name"], "player": player_display(pid), "pos": p.get("position", ""),
+                "age": player_age(pid), "acquired_label": label, "seasons": seasons, "approx": approx,
+            })
+    rows.sort(key=lambda r: (r["team"], -r["seasons"]))
+    return rows
+
+
+def fetch_draft_capital(league_id, teams, base_rounds, seasons_ahead, current_season):
+    """
+    Future rookie-draft pick ownership board. Sleeper's /traded_picks
+    endpoint tracks the LATEST hop for any pick that's changed hands —
+    (season, round, original roster_id) -> current owner_id and the
+    previous_owner_id it was most recently acquired from — which is exactly
+    "who they got the extra pick from" for picks traded more than once too.
+    """
+    try:
+        traded = api(f"/league/{league_id}/traded_picks") or []
+    except Exception:
+        traded = []
+    overrides = {}
+    for tp in traded:
+        try:
+            tseason = int(tp.get("season"))
+        except (TypeError, ValueError):
+            continue
+        overrides[(tseason, tp.get("round"), tp.get("roster_id"))] = {
+            "owner_id": tp.get("owner_id"), "previous_owner_id": tp.get("previous_owner_id"),
+        }
+
+    board = []
+    for season in range(current_season + 1, current_season + 1 + seasons_ahead):
+        rows = []
+        for rnd in range(1, base_rounds + 1):
+            for rid, t in teams.items():
+                ov = overrides.get((season, rnd, rid))
+                owner_id = ov["owner_id"] if ov else rid
+                traded_flag = owner_id != rid
+                via_id = ov["previous_owner_id"] if (ov and traded_flag) else None
+                rows.append({
+                    "round": rnd,
+                    "original_name": t["team_name"],
+                    "owner_name": teams.get(owner_id, {}).get("team_name", f"Team {owner_id}"),
+                    "traded": traded_flag,
+                    "via_name": teams.get(via_id, {}).get("team_name") if via_id is not None else None,
+                })
+        rows.sort(key=lambda r: (r["round"], r["original_name"]))
+        board.append({"season": season, "rows": rows})
+    return board
+
+
+def build_h2h_lookup(rivalries, teams, name_by_id):
+    """All-time head-to-head detail for every pair that's played, keyed
+    'lowRosterId-highRosterId' for the Matchups tab's team-picker tool."""
+    data = {}
+    for pair, h2h in rivalries.items():
+        ids = sorted(pair)
+        if len(ids) < 2:
+            continue
+        a, b = ids
+        games = h2h.get("games", [])
+        closest = min(games, key=lambda g: abs(g["a_score"] - g["b_score"])) if games else None
+        blowout = max(games, key=lambda g: abs(g["a_score"] - g["b_score"])) if games else None
+
+        def top_scorer(rid, roster_ids):
+            best = None
+            for pid, pts in h2h.get("player_pts", {}).get(rid, {}).items():
+                if str(pid) not in roster_ids:
+                    continue
+                if best is None or pts > best[1]:
+                    best = (pid, pts)
+            return {"name": player_display(best[0]), "pts": round(best[1], 1)} if best else None
+
+        roster_a = {str(p) for p in teams.get(a, {}).get("players", [])}
+        roster_b = {str(p) for p in teams.get(b, {}).get("players", [])}
+
+        def game_summary(g):
+            return {"margin": round(abs(g["a_score"] - g["b_score"]), 1), "season": g["season"], "week": g["week"]}
+
+        data[f"{a}-{b}"] = {
+            "a_id": a, "b_id": b,
+            "a_name": name_by_id.get(a, f"Team {a}"), "b_name": name_by_id.get(b, f"Team {b}"),
+            "meetings": h2h["meetings"],
+            "wins_a": h2h["wins"].get(a, 0), "wins_b": h2h["wins"].get(b, 0),
+            "pts_a": round(h2h["points"].get(a, 0), 1), "pts_b": round(h2h["points"].get(b, 0), 1),
+            "closest": game_summary(closest) if closest else None,
+            "blowout": game_summary(blowout) if blowout else None,
+            "top_scorer_a": top_scorer(a, roster_a),
+            "top_scorer_b": top_scorer(b, roster_b),
+        }
+    return data
+
+
+def load_parlay_weeks():
+    """
+    Weekly parlay tracking (1 leg submitted per manager toward a shared
+    12-leg parlay) is entirely outside Sleeper's data model — there's no
+    odds/betting endpoint in the public API — so it's sourced from a small,
+    manually-maintained JSON file (PARLAY_FILE) instead. Expected shape:
+
+      [
+        {"week": 1, "season": 2026, "legs": [
+            {"manager": "Jake", "pick": "Justin Jefferson anytime TD", "result": "hit"},
+            {"manager": "Dana", "pick": "Chiefs -3.5", "result": "miss"},
+            ... one entry per manager's submitted leg ...
+        ]},
+        ...
+      ]
+
+    "result" is "hit", "miss", or "pending" (omit/leave pending before the
+    week's games finish). A missing or malformed file is treated as "no
+    data yet" rather than an error — the tab just shows a placeholder with
+    the expected format until the file exists.
+    """
+    if not PARLAY_FILE or not os.path.exists(PARLAY_FILE):
+        return []
+    try:
+        with open(PARLAY_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, list) else []
+    except Exception:
+        return []
+
+
+def compute_parlay_summary(weeks):
+    if not weeks:
+        return None
+    weekly, manager_stats = [], {}
+    parlays_hit = parlays_decided = 0
+    for wk in sorted(weeks, key=lambda w: (w.get("season", 0), w.get("week", 0))):
+        legs = wk.get("legs") or []
+        results = [l.get("result") for l in legs]
+        if results and all(r == "hit" for r in results):
+            outcome = "hit"
+        elif any(r == "miss" for r in results):
+            outcome = "miss"
+        else:
+            outcome = "pending"
+        if outcome in ("hit", "miss"):
+            parlays_decided += 1
+            if outcome == "hit":
+                parlays_hit += 1
+        for l in legs:
+            mgr = l.get("manager", "Unknown")
+            st = manager_stats.setdefault(mgr, {"hits": 0, "misses": 0, "pending": 0})
+            r = l.get("result")
+            if r == "hit": st["hits"] += 1
+            elif r == "miss": st["misses"] += 1
+            else: st["pending"] += 1
+        weekly.append({"season": wk.get("season"), "week": wk.get("week"), "legs": legs, "outcome": outcome})
+    leaderboard = []
+    for mgr, st in manager_stats.items():
+        decided = st["hits"] + st["misses"]
+        rate = (st["hits"] / decided * 100) if decided else 0
+        leaderboard.append({"manager": mgr, **st, "rate": round(rate, 1), "decided": decided})
+    leaderboard.sort(key=lambda x: (-x["rate"], -x["decided"]))
+    return {"weekly": weekly, "leaderboard": leaderboard, "parlays_hit": parlays_hit, "parlays_decided": parlays_decided}
+
+
 # --------------------------------------------------------------------------- #
 #  ADAPTER: build a common `model` dict from Sleeper
 # --------------------------------------------------------------------------- #
@@ -436,7 +812,7 @@ def build_model():
     reg_season_weeks = max(0, (lg_settings.get("playoff_week_start") or 0) - 1)
 
     teams = build_teams(LEAGUE_ID)
-    scores, pairs, outcomes = weekly_results(LEAGUE_ID, MAX_WEEK)
+    scores, pairs, outcomes, _ = weekly_results(LEAGUE_ID, MAX_WEEK)
     completed = sorted(pairs.keys())
     recent_weeks = completed[-3:]
 
@@ -446,7 +822,7 @@ def build_model():
     for i, t in enumerate(ordered, 1):
         sl, sn = streak_from_outcomes(outcomes.get(t["roster_id"], []))
         standings.append({
-            "rank": i, "name": t["team_name"], "owner": t.get("owner"),
+            "rank": i, "roster_id": t["roster_id"], "name": t["team_name"], "owner": t.get("owner"),
             "wins": t["wins"], "losses": t["losses"], "ties": t["ties"],
             "pf": t["fpts"], "pa": t["fpts_against"], "streak": f"{sl}{sn}" if sn else "-",
             "logo": t.get("avatar"),
@@ -621,12 +997,24 @@ def build_model():
             "pts_a": round(data["points"].get(a, 0), 1), "pts_b": round(data["points"].get(b, 0), 1),
         })
 
+    # ---- front office: roster ages, player tenure, draft capital ----
+    acquisition, trade_log = fetch_transaction_history(LEAGUE_ID, season, HISTORY_START_YEAR)
+    roster_ages = compute_roster_ages(teams)
+    player_tenure = compute_player_tenure(teams, acquisition, season)
+    base_rounds = (draft or {}).get("rounds") or ROOKIE_DRAFT_ROUNDS
+    draft_capital = fetch_draft_capital(LEAGUE_ID, teams, base_rounds, DRAFT_CAPITAL_YEARS_AHEAD, season)
+
+    # ---- head-to-head lookup (Matchups tab tool) ----
+    h2h_lookup = build_h2h_lookup(rivalries, teams, name_by_id)
+
     return {
         "league_name": league_name, "platform": "Sleeper", "season": season,
         "current_week": current_week,
         "standings": standings, "matchups": matchups, "power": power, "luck": luck,
         "activity": activity, "draft": draft, "history": hist,
         "playoff_spots": playoff_spots, "reg_season_weeks": reg_season_weeks,
+        "roster_ages": roster_ages, "player_tenure": player_tenure,
+        "draft_capital": draft_capital, "trade_log": trade_log, "h2h": h2h_lookup,
     }
 
 
@@ -661,24 +1049,26 @@ def team_cell(name, owner=None, logo=None):
 CSS = """
 *{box-sizing:border-box;margin:0;padding:0}
 body{font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;background:#0f1424;color:#e6e9f0;padding:24px}
+h1,h2,h3{font-family:Georgia,'Times New Roman',serif}
 h1{font-size:1.6rem;margin-bottom:4px}
 .subtitle{color:#8a92a8;margin-bottom:20px;font-size:.95rem}
 
 /* ---------- Hero / title banner ---------- */
 .hero{position:relative;overflow:hidden;border-radius:18px;border:1px solid #2a3348;padding:40px 32px;margin-bottom:28px;background:linear-gradient(180deg,#121a30 0%,#161d30 100%)}
 .hero-glow{position:absolute;inset:-40%;background:
-    radial-gradient(circle at 20% 20%,rgba(34,197,94,0.28),transparent 45%),
-    radial-gradient(circle at 80% 30%,rgba(45,212,191,0.24),transparent 45%),
-    radial-gradient(circle at 50% 90%,rgba(59,130,246,0.24),transparent 50%);
+    radial-gradient(circle at 20% 20%,rgba(34,197,94,0.24),transparent 45%),
+    radial-gradient(circle at 80% 30%,rgba(45,212,191,0.20),transparent 45%),
+    radial-gradient(circle at 50% 90%,rgba(59,130,246,0.20),transparent 50%);
   filter:blur(10px);pointer-events:none}
 .hero-content{position:relative;z-index:1}
 .hero-eyebrow{color:#8a92a8;font-size:12px;font-weight:700;letter-spacing:1.5px;text-transform:uppercase;margin-bottom:10px}
-.hero-title{margin:0 0 18px 0;font-size:42px;font-weight:800;letter-spacing:-1px;line-height:1.1;
+.hero-title{font-family:Georgia,'Times New Roman',serif;margin:0 0 18px 0;font-size:42px;font-weight:700;letter-spacing:-0.5px;line-height:1.1;
   background:linear-gradient(90deg,#ffffff 0%,#cfd8f5 55%,#22c55e 130%);
   -webkit-background-clip:text;background-clip:text;color:transparent}
 .hero-meta{display:flex;flex-wrap:wrap;gap:8px}
 .hero-chip{display:inline-flex;align-items:center;gap:6px;padding:6px 14px;border-radius:999px;font-size:13px;font-weight:600;background:rgba(255,255,255,0.06);border:1px solid rgba(255,255,255,0.1);color:#e6e9f0;backdrop-filter:blur(4px)}
 .hero-chip-muted{color:#8a92a8;font-weight:400;background:transparent;border-color:#2a3348}
+.hero-chip-est{border-color:rgba(45,212,191,0.4);color:#2dd4bf}
 @media (max-width:640px){
   .hero{padding:24px 18px;border-radius:14px;margin-bottom:18px}
   .hero-title{font-size:28px}
@@ -687,15 +1077,16 @@ h1{font-size:1.6rem;margin-bottom:4px}
 .tabs{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:18px}
 .tab{background:#1a2138;border:1px solid #2a3348;color:#c2c8d8;padding:9px 16px;border-radius:8px;cursor:pointer;font-size:.9rem}
 .tab.active{background:#3b82f6;color:#fff;border-color:#3b82f6}
-.panel{display:none;background:#161d30;border:1px solid #2a3348;border-radius:12px;padding:20px}
+.panel{display:none;background:#161d30;border:1px solid #2a3348;border-top:3px solid;border-image:linear-gradient(90deg,#3b82f6,#22c55e) 1;border-radius:12px;padding:20px}
 .panel.active{display:block}
-.section-title{font-size:1.15rem;margin-bottom:12px;color:#fff}
+.section-title{position:relative;padding-left:14px;font-size:1.15rem;margin-bottom:12px;color:#fff}
+.section-title::before{content:'';position:absolute;left:0;top:3px;bottom:3px;width:4px;border-radius:2px;background:linear-gradient(180deg,#3b82f6,#22c55e)}
 .section-note{color:#8a92a8;font-size:.85rem;margin-bottom:14px}
 table{width:100%;border-collapse:collapse;font-size:.88rem}
 th{text-align:left;color:#8a92a8;padding:8px 10px;border-bottom:1px solid #2a3348;font-weight:600}
 td{padding:9px 10px;border-bottom:1px solid #1f2740}
 .team-cell-inner{display:flex;align-items:center;gap:10px}
-.logo{width:30px;height:30px;border-radius:50%;object-fit:cover}
+.logo{width:30px;height:30px;border-radius:50%;object-fit:cover;border:2px solid rgba(59,130,246,0.35)}
 .team-name-main{font-weight:600;color:#e6e9f0}
 .owner-name{font-size:.78rem;color:#7a82a0}
 .matchup-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:14px}
@@ -760,12 +1151,43 @@ td{padding:9px 10px;border-bottom:1px solid #1f2740}
   .playoff-record{grid-area:record}
   .playoff-detail{grid-area:detail}
   .playoff-badge{grid-area:badge;justify-self:start}
+  .h2h-picker{flex-direction:column;align-items:stretch}
 }
+
+/* ---------- Head-to-Head lookup (Matchups tab) ---------- */
+.h2h-picker{display:flex;align-items:center;gap:12px;margin-bottom:16px}
+.h2h-picker select{background:#1a2138;border:1px solid #2a3348;color:#e6e9f0;padding:8px 12px;border-radius:8px;font-size:.9rem;flex:1}
 """
 
 JS = """
 function showTab(id,btn){document.querySelectorAll('.tab').forEach(t=>t.classList.remove('active'));document.querySelectorAll('.panel').forEach(p=>p.classList.remove('active'));btn.classList.add('active');document.getElementById(id).classList.add('active');}
 function showSubTab(id,btn){btn.parentNode.querySelectorAll('.subtab').forEach(t=>t.classList.remove('active'));btn.parentNode.parentNode.querySelectorAll('.subpanel').forEach(p=>p.classList.remove('active'));btn.classList.add('active');document.getElementById(id).classList.add('active');}
+function updateH2H(){
+  var a=document.getElementById('h2hA'), b=document.getElementById('h2hB');
+  if(!a||!b||!window.H2H_DATA) return;
+  var idA=parseInt(a.value,10), idB=parseInt(b.value,10);
+  var out=document.getElementById('h2hResult');
+  if(!out) return;
+  if(idA===idB){ out.innerHTML="<p class='empty'>Pick two different teams.</p>"; return; }
+  var lo=Math.min(idA,idB), hi=Math.max(idA,idB);
+  var d=window.H2H_DATA[lo+'-'+hi];
+  if(!d){ out.innerHTML="<p class='empty'>These teams haven't played each other yet.</p>"; return; }
+  var flip = (idA !== d.a_id);
+  var nameA = flip ? d.b_name : d.a_name, nameB = flip ? d.a_name : d.b_name;
+  var winsA = flip ? d.wins_b : d.wins_a, winsB = flip ? d.wins_a : d.wins_b;
+  var ptsA = flip ? d.pts_b : d.pts_a, ptsB = flip ? d.pts_a : d.pts_b;
+  var topA = flip ? d.top_scorer_b : d.top_scorer_a, topB = flip ? d.top_scorer_a : d.top_scorer_b;
+  var html = "<div class='record-grid'>";
+  html += "<div class='record-card'><div class='record-label'>All-Time Record</div><div class='record-value'>"+winsA+" - "+winsB+"</div><div class='record-context'>"+nameA+" vs "+nameB+" &middot; "+d.meetings+" meetings</div></div>";
+  html += "<div class='record-card'><div class='record-label'>Total Points</div><div class='record-value'>"+ptsA.toFixed(1)+" &ndash; "+ptsB.toFixed(1)+"</div><div class='record-context'>"+nameA+" vs "+nameB+"</div></div>";
+  if(d.closest){ html += "<div class='record-card'><div class='record-label'>Closest Game</div><div class='record-value'>"+d.closest.margin.toFixed(1)+" <span class='record-unit'>pt margin</span></div><div class='record-context'>Week "+d.closest.week+", "+d.closest.season+"</div></div>"; }
+  if(d.blowout){ html += "<div class='record-card'><div class='record-label'>Biggest Blowout</div><div class='record-value'>"+d.blowout.margin.toFixed(1)+" <span class='record-unit'>pt margin</span></div><div class='record-context'>Week "+d.blowout.week+", "+d.blowout.season+"</div></div>"; }
+  if(topA){ html += "<div class='record-card'><div class='record-label'>"+nameA+"'s Top Scorer vs "+nameB+"</div><div class='record-value'>"+topA.pts.toFixed(1)+"</div><div class='record-context'>"+topA.name+" &middot; currently rostered</div></div>"; }
+  if(topB){ html += "<div class='record-card'><div class='record-label'>"+nameB+"'s Top Scorer vs "+nameA+"</div><div class='record-value'>"+topB.pts.toFixed(1)+"</div><div class='record-context'>"+topB.name+" &middot; currently rostered</div></div>"; }
+  html += "</div>";
+  out.innerHTML = html;
+}
+if (document.getElementById('h2hA')) { updateH2H(); }
 """
 
 
@@ -859,16 +1281,36 @@ def render_standings_section(model):
 
 
 
-def render_matchups(mup):
-    if not mup: return "<p class='empty'>No matchup data available for this week yet.</p>"
-    cards = []
-    for m in mup:
-        cards.append(f"""<div class='matchup-card'><div class='matchup-teams'>
-          <div class='matchup-team'><div class='team-name-main'>{esc(m['away']['name'])}</div><div class='team-record'>{esc(m['away']['record'])}</div><div class='proj-score'>{m['away']['proj']:.1f}</div></div>
-          <div class='vs'>@</div>
-          <div class='matchup-team'><div class='team-name-main'>{esc(m['home']['name'])}</div><div class='team-record'>{esc(m['home']['record'])}</div><div class='proj-score'>{m['home']['proj']:.1f}</div></div>
-          </div><p class='outlook'>{esc(m['outlook'])}</p></div>""")
-    return f"<div class='matchup-grid'>{''.join(cards)}</div>"
+def render_matchups(model):
+    mup = model['matchups']
+    if not mup:
+        cards_html = "<p class='empty'>No matchup data available for this week yet.</p>"
+    else:
+        cards = []
+        for m in mup:
+            cards.append(f"""<div class='matchup-card'><div class='matchup-teams'>
+              <div class='matchup-team'><div class='team-name-main'>{esc(m['away']['name'])}</div><div class='team-record'>{esc(m['away']['record'])}</div><div class='proj-score'>{m['away']['proj']:.1f}</div></div>
+              <div class='vs'>@</div>
+              <div class='matchup-team'><div class='team-name-main'>{esc(m['home']['name'])}</div><div class='team-record'>{esc(m['home']['record'])}</div><div class='proj-score'>{m['home']['proj']:.1f}</div></div>
+              </div><p class='outlook'>{esc(m['outlook'])}</p></div>""")
+        cards_html = f"<div class='matchup-grid'>{''.join(cards)}</div>"
+
+    teams_sorted = sorted(model['standings'], key=lambda s: s['name'])
+    if len(teams_sorted) < 2:
+        return cards_html
+    opts_a = "".join(f"<option value='{s['roster_id']}'{' selected' if i == 0 else ''}>{esc(s['name'])}</option>" for i, s in enumerate(teams_sorted))
+    opts_b = "".join(f"<option value='{s['roster_id']}'{' selected' if i == 1 else ''}>{esc(s['name'])}</option>" for i, s in enumerate(teams_sorted))
+    h2h_json = json.dumps(model['h2h'])
+    h2h_tool = f"""<h2 class="section-title" style="margin-top:28px">Head-to-Head Lookup</h2>
+    <p class="section-note">Pick two teams to see their all-time series &mdash; record, points, closest game, biggest blowout, and each side's currently-rostered top scorer against the other.</p>
+    <div class="h2h-picker">
+      <select id="h2hA" onchange="updateH2H()">{opts_a}</select>
+      <span class="vs">vs</span>
+      <select id="h2hB" onchange="updateH2H()">{opts_b}</select>
+    </div>
+    <div id="h2hResult" class="h2h-result"></div>
+    <script>window.H2H_DATA = {h2h_json};</script>"""
+    return cards_html + h2h_tool
 
 
 def render_power(power):
@@ -912,6 +1354,139 @@ def render_draft(draft):
                 cells += "<td></td>"
         body.append(f"<tr>{cells}</tr>")
     return f"<div class='draft-grid'><table><thead>{head}</thead><tbody>{''.join(body)}</tbody></table></div>"
+
+
+def render_trade_history(trade_log):
+    if not trade_log:
+        return "<p class='empty'>No trades found in the tracked history window.</p>"
+    cards = []
+    for t in trade_log:
+        sides = "".join(
+            f"<div class='matchup-team'><div class='team-name-main'>{esc(side['name'])}</div>"
+            f"<div class='owner-name'>Gets: {esc(', '.join(side['gets']) or '—')}</div></div>"
+            for side in t["teams"]
+        )
+        cards.append(f"<div class='rivalry-card'><div class='rivalry-meetings'>{esc(t['date'])} &middot; Week {t['week']}, {t['season']}</div><div class='matchup-teams'>{sides}</div></div>")
+    return f"<div class='rivalry-grid'>{''.join(cards)}</div>"
+
+
+def render_transactions_section(activity, trade_log):
+    sub_nav = ("<button class='subtab active' onclick=\"showSubTab('tx-recent',this)\">Recent Activity</button>"
+               "<button class='subtab' onclick=\"showSubTab('tx-trades',this)\">Trade History</button>")
+    return (f"<div class='subtabs'>{sub_nav}</div>"
+            f"<div id='tx-recent' class='subpanel active'>{render_activity(activity)}</div>"
+            f"<div id='tx-trades' class='subpanel'>{render_trade_history(trade_log)}</div>")
+
+
+def render_roster_ages(rows):
+    if not rows:
+        return "<p class='empty'>No roster age data available (players missing birth dates).</p>"
+    body = "".join(
+        f"<tr><td class='team-cell'>{team_cell(r['name'], r.get('owner'), r.get('logo'))}</td>"
+        f"<td>{r['avg_age']}</td><td>{esc(r['oldest_name'])} ({r['oldest_age']})</td>"
+        f"<td>{esc(r['youngest_name'])} ({r['youngest_age']})</td><td>{r['counted']}</td></tr>"
+        for r in rows
+    )
+    return (f"<p class='section-note'>Average age across each team's full rostered player pool (bench/IR included). Sorted youngest to oldest roster.</p>"
+            f"<table><thead><tr><th>Team</th><th>Avg Age</th><th>Oldest</th><th>Youngest</th><th>Players Counted</th></tr></thead><tbody>{body}</tbody></table>")
+
+
+def render_player_tenure(rows):
+    if not rows:
+        return "<p class='empty'>No tenure data available yet.</p>"
+    body = "".join(
+        f"<tr><td>{esc(r['team'])}</td><td>{esc(r['player'])}</td><td>{esc(r['pos'])}</td>"
+        f"<td>{r['age'] if r['age'] is not None else '-'}</td>"
+        f"<td>{esc(r['acquired_label'])}{'*' if r['approx'] else ''}</td>"
+        f"<td>{r['seasons']}</td></tr>"
+        for r in rows
+    )
+    note = ("* Tenure is a lower bound — this player was already on the roster at the start of "
+            "the tracked history window, so the true acquisition date may be earlier."
+            if any(r["approx"] for r in rows) else "")
+    return (f"<p class='section-note'>How long each currently-rostered player has been with their team.</p>"
+            f"<table><thead><tr><th>Team</th><th>Player</th><th>Pos</th><th>Age</th><th>Acquired</th><th>Seasons</th></tr></thead><tbody>{body}</tbody></table>"
+            + (f"<p class='section-note' style='margin-top:10px'>{note}</p>" if note else ""))
+
+
+def render_draft_capital(board):
+    if not board:
+        return "<p class='empty'>No draft pick data available.</p>"
+    sections = []
+    for season_block in board:
+        rows = "".join(
+            f"<tr><td>{r['round']}</td><td>{esc(r['original_name'])}</td>"
+            f"<td>{esc(r['owner_name'])}"
+            + (f" <span class='trophy-vs'>(via {esc(r['via_name'])})</span>" if r['traded'] and r.get('via_name') else "")
+            + "</td></tr>"
+            for r in season_block["rows"]
+        )
+        sections.append(
+            f"<h3 class='playoff-col-title' style='margin:18px 0 10px'>{season_block['season']} Draft</h3>"
+            f"<table><thead><tr><th>Round</th><th>Original Owner</th><th>Current Owner</th></tr></thead><tbody>{rows}</tbody></table>"
+        )
+    return "<p class='section-note'>Who currently holds each future rookie-draft pick, including trade attribution.</p>" + "".join(sections)
+
+
+def render_front_office(model):
+    sub_nav = ("<button class='subtab active' onclick=\"showSubTab('fo-ages',this)\">Roster Ages</button>"
+               "<button class='subtab' onclick=\"showSubTab('fo-tenure',this)\">Player Tenure</button>"
+               "<button class='subtab' onclick=\"showSubTab('fo-capital',this)\">Draft Capital</button>")
+    return (f"<div class='subtabs'>{sub_nav}</div>"
+            f"<div id='fo-ages' class='subpanel active'>{render_roster_ages(model['roster_ages'])}</div>"
+            f"<div id='fo-tenure' class='subpanel'>{render_player_tenure(model['player_tenure'])}</div>"
+            f"<div id='fo-capital' class='subpanel'>{render_draft_capital(model['draft_capital'])}</div>")
+
+
+def render_superlatives(superlatives):
+    if not superlatives:
+        return ("<h2 class='section-title'>Draft-Position Superlatives</h2>"
+                "<p class='section-note'>Awaiting this league's superlative definitions. Once configured "
+                "(see the SUPERLATIVES list near the top of the script), this tab will track in-season "
+                "awards that determine next year's rookie draft order.</p>")
+    cards = "".join(
+        f"<div class='record-card'><div class='record-label'>{esc(s['name'])}</div>"
+        f"<div class='record-value'>{esc(s.get('value', ''))}</div>"
+        f"{team_cell(s.get('leader', 'TBD'))}"
+        f"<div class='record-context'>{esc(s.get('description', ''))}</div></div>"
+        for s in superlatives
+    )
+    return (f"<h2 class='section-title'>Draft-Position Superlatives</h2>"
+            f"<p class='section-note'>In-season awards that carry into next year's rookie draft order.</p>"
+            f"<div class='record-grid'>{cards}</div>")
+
+
+def render_parlay(summary):
+    if not summary:
+        return ("<h2 class='section-title'>Weekly Parlay</h2>"
+                f"<p class='section-note'>No parlay data found yet. Add entries to <code>{esc(PARLAY_FILE)}</code> "
+                "to start tracking &mdash; see the load_parlay_weeks() docstring in the script for the expected format.</p>")
+    decided = summary["parlays_decided"]
+    rate = (summary["parlays_hit"] / decided * 100) if decided else 0
+    header = (f"<h2 class='section-title'>Weekly Parlay</h2>"
+              f"<p class='section-note'>Season parlay record: {summary['parlays_hit']}-{decided - summary['parlays_hit']} "
+              f"({rate:.0f}% of weeks hit all 12 legs)</p>")
+    lb_rows = "".join(
+        f"<tr><td>{esc(r['manager'])}</td><td>{r['hits']}-{r['misses']}</td><td>{r['rate']}%</td></tr>"
+        for r in summary["leaderboard"]
+    )
+    lb_html = (f"<h3 class='playoff-col-title' style='margin:18px 0 10px'>Leg Leaderboard</h3>"
+               f"<table><thead><tr><th>Manager</th><th>Record</th><th>Hit Rate</th></tr></thead><tbody>{lb_rows}</tbody></table>")
+    badge_cls = {"hit": "badge-clinched", "miss": "badge-eliminated", "pending": "badge-hunt"}
+    weeks_html = []
+    for wk in reversed(summary["weekly"]):
+        legs_rows = "".join(
+            f"<tr><td>{esc(l.get('manager', ''))}</td><td>{esc(l.get('pick', ''))}</td>"
+            f"<td><span class='playoff-badge {badge_cls.get(l.get('result'), 'badge-hunt')}'>{esc((l.get('result') or 'pending').title())}</span></td></tr>"
+            for l in wk["legs"]
+        )
+        weeks_html.append(
+            f"<div class='record-card' style='text-align:left;margin-bottom:14px'>"
+            f"<div class='record-label'>Week {wk['week']}, {wk['season']} "
+            f"<span class='playoff-badge {badge_cls.get(wk['outcome'], 'badge-hunt')}'>{wk['outcome'].title()}</span></div>"
+            f"<table><thead><tr><th>Manager</th><th>Pick</th><th>Result</th></tr></thead><tbody>{legs_rows}</tbody></table></div>"
+        )
+    return header + lb_html + "<h3 class='playoff-col-title' style='margin:18px 0 10px'>Weekly Breakdown</h3>" + "".join(weeks_html)
 
 
 def _streak_span_label(entry):
@@ -1022,11 +1597,14 @@ def render_history(hist, current_season):
 def render(model):
     panels = [
         ("standings", "Standings", render_standings_section(model)),
-        ("matchups", "Matchups", render_matchups(model['matchups'])),
+        ("matchups", "Matchups", render_matchups(model)),
         ("power", "Power Rankings", render_power(model['power'])),
         ("luck", "Luck Index", render_luck(model['luck'])),
-        ("activity", "Recent Activity", render_activity(model['activity'])),
+        ("frontoffice", "Front Office", render_front_office(model)),
+        ("transactions", "Transactions", render_transactions_section(model['activity'], model['trade_log'])),
         ("draft", "Draft Board", render_draft(model['draft'])),
+        ("superlatives", "Superlatives", render_superlatives(SUPERLATIVES)),
+        ("parlay", "Weekly Parlay", render_parlay(compute_parlay_summary(load_parlay_weeks()))),
         ("history", "History", render_history(model['history'], model['season'])),
     ]
     tabs = "".join(f"<button class='tab{' active' if i==0 else ''}' onclick=\"showTab('{pid}',this)\">{label}</button>" for i, (pid, label, _) in enumerate(panels))
@@ -1035,12 +1613,15 @@ def render(model):
     team_count = len(model['standings'])
     leader_name = model['standings'][0]['name'] if model['standings'] else "TBD"
     updated = datetime.now().strftime("%b %d, %Y %I:%M %p")
+    season_years = list(model['history'].get('season_standings', {}).keys())
+    est_year = min(season_years) if season_years else model['season']
     hero = f"""<header class="hero">
   <div class="hero-glow"></div>
   <div class="hero-content">
-    <div class="hero-eyebrow">Fantasy Football &middot; {model['season']} Season</div>
+    <div class="hero-eyebrow">Dynasty Franchise &middot; {model['season']} Season</div>
     <h1 class="hero-title">{esc(model['league_name'])}</h1>
     <div class="hero-meta">
+      <span class="hero-chip hero-chip-est">Est. {est_year}</span>
       <span class="hero-chip">Week {model['current_week']}</span>
       <span class="hero-chip">{team_count} Teams</span>
       <span class="hero-chip">&#127942; {esc(leader_name)}</span>
