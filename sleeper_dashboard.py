@@ -1177,6 +1177,18 @@ def build_model():
     local_parlay_summary = compute_parlay_summary(load_parlay_weeks())
     stat_superlatives = compute_stat_superlatives(LEAGUE_ID, teams, standings, pairs, local_parlay_summary)
 
+    # ---- manager -> active roster, for the Weekly Parlay pick dropdown ----
+    manager_rosters = {}
+    for t in teams.values():
+        key = t.get("owner") or t["team_name"]
+        manager_rosters[key] = sorted(
+            (
+                {"name": player_display(pid), "pos": (get_players().get(str(pid)) or {}).get("position", "")}
+                for pid in t.get("players", [])
+            ),
+            key=lambda p: p["name"],
+        )
+
     return {
         "league_name": league_name, "platform": "Sleeper", "season": season,
         "current_week": current_week,
@@ -1185,7 +1197,7 @@ def build_model():
         "playoff_spots": playoff_spots, "reg_season_weeks": reg_season_weeks,
         "roster_ages": roster_ages, "player_tenure": player_tenure,
         "draft_capital": draft_capital, "trade_log": trade_log, "h2h": h2h_lookup,
-        "stat_superlatives": stat_superlatives,
+        "stat_superlatives": stat_superlatives, "manager_rosters": manager_rosters,
     }
 
 
@@ -1348,6 +1360,25 @@ function showSubTab(id,btn){btn.parentNode.querySelectorAll('.subtab').forEach(t
 function escHtml(s){
   return String(s == null ? '' : s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
 }
+function populatePickSelect(pickEl, manager, currentPick){
+  // Fills a "pick" <select> with the chosen manager's current active roster.
+  // If currentPick doesn't match anyone currently on that roster (they were
+  // traded/dropped since this leg was submitted), it's still added as a
+  // selected-but-labeled option so editing an old week never silently
+  // blanks out what was actually picked.
+  if (!pickEl) return;
+  var roster = (window.MANAGER_ROSTERS && window.MANAGER_ROSTERS[manager]) || [];
+  var seen = false;
+  var opts = roster.map(function(p){
+    if (p.name === currentPick) seen = true;
+    var label = p.name + (p.pos ? ' (' + p.pos + ')' : '');
+    return '<option value="' + escHtml(p.name) + '"' + (p.name === currentPick ? ' selected' : '') + '>' + escHtml(label) + '</option>';
+  }).join('');
+  if (currentPick && !seen) {
+    opts += '<option value="' + escHtml(currentPick) + '" selected>' + escHtml(currentPick) + ' (not on current roster)</option>';
+  }
+  pickEl.innerHTML = '<option value="">' + (manager ? 'Select player…' : 'Select manager first…') + '</option>' + opts;
+}
 function updateBestParlayPickerCard(stats){
   // Fills the Superlatives tab's "Best Parlay Picker" card once live parlay
   // data loads (Sheets/Supabase backends only — the local-file backend's
@@ -1397,16 +1428,27 @@ function addParlayLegRow(manager, pick, result){
   if(!wrap) return;
   var row = document.createElement('div');
   row.className = 'parlay-entry-row';
-  var esc_ = function(s){ return (s||'').replace(/"/g,'&quot;'); };
-  var opts = ['pending','hit','miss'].map(function(r){
+  var managers = Object.keys(window.MANAGER_ROSTERS || {}).sort();
+  var mgrOpts = '<option value="">Select manager…</option>' + managers.map(function(m){
+    return '<option value="' + escHtml(m) + '"' + (m === manager ? ' selected' : '') + '>' + escHtml(m) + '</option>';
+  }).join('');
+  var resultOpts = ['pending','hit','miss'].map(function(r){
     return "<option value='"+r+"'"+(r===(result||'pending')?' selected':'')+">"+r+"</option>";
   }).join('');
   row.innerHTML =
-    `<input list='parlayManagers' placeholder='Manager' class='px-manager' value="${esc_(manager)}">` +
-    `<input placeholder='Pick' class='px-pick' value="${esc_(pick)}">` +
-    `<select class='px-result'>${opts}</select>` +
-    `<button type='button' onclick='this.parentNode.remove()'>&times;</button>`;
+    `<select class="px-manager" onchange="onParlayRowManagerChange(this)">${mgrOpts}</select>` +
+    `<select class="px-pick"></select>` +
+    `<select class="px-result">${resultOpts}</select>` +
+    `<button type="button" onclick="this.parentNode.remove()">&times;</button>`;
   wrap.appendChild(row);
+  populatePickSelect(row.querySelector('.px-pick'), manager || '', pick || '');
+}
+function onParlayRowManagerChange(sel){
+  var row = sel.parentNode;
+  populatePickSelect(row.querySelector('.px-pick'), sel.value, '');
+}
+function onSubmitManagerChange(prefix){
+  populatePickSelect(document.getElementById(prefix + 'Pick'), document.getElementById(prefix + 'Manager').value, '');
 }
 function loadParlayDraft(){
   try { return JSON.parse(localStorage.getItem('parlayDraftWeeks') || '[]'); } catch(e){ return []; }
@@ -2004,7 +2046,8 @@ def render_parlay(weeks, model):
 
 def render_parlay_sheets(model):
     managers = sorted({(s.get('owner') or s['name']) for s in model['standings']})
-    manager_options = "".join(f"<option value='{esc(m)}'></option>" for m in managers)
+    manager_options = "".join(f"<option value='{esc(m)}'>{esc(m)}</option>" for m in managers)
+    manager_rosters_json = json.dumps(model.get('manager_rosters', {}))
     return f"""<h2 class="section-title">Weekly Parlay</h2>
     <p class="section-note">Live via Google Sheets &mdash; every manager can submit their own leg from their own device. Results are graded behind a PIN.</p>
     <div id="parlaySheetStatus" class="section-note">Loading&hellip;</div>
@@ -2017,11 +2060,13 @@ def render_parlay_sheets(model):
         <input type="number" id="shWeek" placeholder="Week" value="{model['current_week']}">
       </div>
       <div class="parlay-entry-row">
-        <input list="parlayManagers" id="shManager" placeholder="Your name">
-        <input id="shPick" placeholder="Your pick (e.g. Justin Jefferson anytime TD)">
+        <select id="shManager" onchange="onSubmitManagerChange('sh')">
+          <option value="">Select your name&hellip;</option>
+          {manager_options}
+        </select>
+        <select id="shPick"><option value="">Select manager first&hellip;</option></select>
         <button type="button" onclick="submitParlayLegSheets()">Submit Leg</button>
       </div>
-      <datalist id="parlayManagers">{manager_options}</datalist>
       <p id="shSubmitStatus" class="section-note"></p>
     </div>
 
@@ -2040,12 +2085,14 @@ def render_parlay_sheets(model):
 
     <script>
       window.SHEETS_WEBAPP_URL = {json.dumps(SHEETS_WEBAPP_URL)};
+      window.MANAGER_ROSTERS = {manager_rosters_json};
     </script>"""
 
 
 def render_parlay_supabase(model):
     managers = sorted({(s.get('owner') or s['name']) for s in model['standings']})
-    manager_options = "".join(f"<option value='{esc(m)}'></option>" for m in managers)
+    manager_options = "".join(f"<option value='{esc(m)}'>{esc(m)}</option>" for m in managers)
+    manager_rosters_json = json.dumps(model.get('manager_rosters', {}))
     return f"""<h2 class="section-title">Weekly Parlay</h2>
     <p class="section-note">Live &mdash; every manager can submit their own leg from their own device. Results are graded behind a PIN.</p>
     <div id="parlaySbStatus" class="section-note">Loading&hellip;</div>
@@ -2058,11 +2105,13 @@ def render_parlay_supabase(model):
         <input type="number" id="sbWeek" placeholder="Week" value="{model['current_week']}">
       </div>
       <div class="parlay-entry-row">
-        <input list="parlayManagers" id="sbManager" placeholder="Your name">
-        <input id="sbPick" placeholder="Your pick (e.g. Justin Jefferson anytime TD)">
+        <select id="sbManager" onchange="onSubmitManagerChange('sb')">
+          <option value="">Select your name&hellip;</option>
+          {manager_options}
+        </select>
+        <select id="sbPick"><option value="">Select manager first&hellip;</option></select>
         <button type="button" onclick="submitParlayLeg()">Submit Leg</button>
       </div>
-      <datalist id="parlayManagers">{manager_options}</datalist>
       <p id="sbSubmitStatus" class="section-note"></p>
     </div>
 
@@ -2082,6 +2131,7 @@ def render_parlay_supabase(model):
     <script>
       window.SUPABASE_URL = {json.dumps(SUPABASE_URL)};
       window.SUPABASE_ANON_KEY = {json.dumps(SUPABASE_ANON_KEY)};
+      window.MANAGER_ROSTERS = {manager_rosters_json};
     </script>"""
 
 
@@ -2132,8 +2182,7 @@ def render_parlay_local(weeks, model):
                    f"or hand-edit <code>{esc(PARLAY_FILE)}</code> directly.</p>")
         body_html = ""
 
-    managers = sorted({(s.get('owner') or s['name']) for s in model['standings']})
-    manager_options = "".join(f"<option value='{esc(m)}'></option>" for m in managers)
+    manager_rosters_json = json.dumps(model.get('manager_rosters', {}))
     parlay_json = json.dumps(weeks)
 
     entry_form = f"""
@@ -2147,7 +2196,6 @@ def render_parlay_local(weeks, model):
         <input type="number" id="pxWeek" placeholder="Week" value="{model['current_week']}">
         <button type="button" onclick="loadParlayWeek()">Load Week</button>
       </div>
-      <datalist id="parlayManagers">{manager_options}</datalist>
       <div id="parlayLegRows"></div>
       <div class="parlay-entry-actions">
         <button type="button" onclick="addParlayLegRow()">+ Add Leg</button>
@@ -2157,6 +2205,7 @@ def render_parlay_local(weeks, model):
       <p id="parlayStatus" class="section-note"></p>
     </div>
     <script>
+      window.MANAGER_ROSTERS = {manager_rosters_json};
       window.PARLAY_DATA = {parlay_json};
       window.PARLAY_FILE_NAME = {json.dumps(PARLAY_FILE)};
     </script>"""
