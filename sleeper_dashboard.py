@@ -1341,17 +1341,79 @@ td{padding:9px 10px;border-bottom:1px solid #1f2740}
 .h2h-picker{display:flex;align-items:center;gap:12px;margin-bottom:16px}
 .h2h-picker select{background:#1a2138;border:1px solid #2a3348;color:#e6e9f0;padding:8px 12px;border-radius:8px;font-size:.9rem;flex:1}
 
-/* ---------- Weekly Parlay entry form ---------- */
-.parlay-entry{background:#1a2138;border:1px solid #2a3348;border-radius:10px;padding:16px;margin-top:10px}
+/* ---------- Weekly Parlay: shared entry-form styling ---------- */
+.parlay-entry{background:#1a2138;border:1px solid #2a3348;border-radius:12px;padding:18px;margin-top:10px}
 .parlay-entry-row{display:grid;grid-template-columns:1fr 2fr auto auto;gap:8px;margin-bottom:8px;align-items:center}
 .parlay-entry-header{grid-template-columns:1fr 1fr auto}
-.parlay-entry-row input,.parlay-entry-row select{background:#0f1424;border:1px solid #2a3348;color:#e6e9f0;padding:7px 10px;border-radius:6px;font-size:.85rem;width:100%}
-.parlay-entry-actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:10px}
-.parlay-entry-actions button,.parlay-entry-row button{background:#3b82f6;color:#fff;border:none;padding:7px 14px;border-radius:6px;cursor:pointer;font-size:.85rem}
-.parlay-entry-row button{background:#f87171;padding:6px 10px}
+.parlay-entry-row input,.parlay-entry-row select{background:#0f1424;border:1px solid #2a3348;color:#e6e9f0;padding:8px 11px;border-radius:7px;font-size:.85rem;width:100%;transition:border-color .15s ease}
+.parlay-entry-row input:focus,.parlay-entry-row select:focus{outline:none;border-color:#3b82f6}
+.parlay-entry-actions{display:flex;gap:10px;flex-wrap:wrap;margin-top:14px}
+.btn-primary{background:linear-gradient(135deg,#3b82f6,#22c55e);color:#fff;border:none;padding:10px 20px;border-radius:8px;cursor:pointer;font-weight:700;font-size:.85rem;box-shadow:0 2px 8px rgba(59,130,246,0.25);transition:transform .12s ease,box-shadow .12s ease}
+.btn-primary:hover{transform:translateY(-1px);box-shadow:0 4px 14px rgba(59,130,246,0.35)}
+.btn-secondary{background:#0f1424;color:#cfd5e6;border:1px solid #2a3348;padding:9px 16px;border-radius:8px;cursor:pointer;font-size:.85rem;transition:border-color .15s ease}
+.btn-secondary:hover{border-color:#3b82f6}
+.btn-remove{background:transparent;color:#8a92a8;border:1px solid #2a3348;width:32px;height:32px;border-radius:7px;cursor:pointer;font-size:.9rem;line-height:1}
+.btn-remove:hover{color:#f87171;border-color:#f87171}
+
+/* Numbered leg-builder rows with a fill-progress bar */
+.parlay-builder-row{display:grid;grid-template-columns:26px 1fr 1fr auto auto;align-items:center;gap:10px;padding:6px 0}
+.parlay-builder-num{width:24px;height:24px;border-radius:50%;background:#0f1424;border:1px solid #2a3348;color:#8a92a8;display:flex;align-items:center;justify-content:center;font-size:.68rem;font-weight:800;flex-shrink:0}
+.parlay-progress-wrap{display:flex;align-items:center;gap:10px;margin:4px 0 14px}
+.parlay-progress{flex:1;height:6px;border-radius:4px;background:#0f1424;overflow:hidden}
+.parlay-progress-fill{height:100%;background:linear-gradient(90deg,#3b82f6,#22c55e);transition:width .25s ease;border-radius:4px}
+.parlay-progress-label{font-size:.72rem;color:#8a92a8;white-space:nowrap;font-weight:600}
+
+/* Status messages as colored alert boxes instead of plain text */
+.parlay-alert{padding:10px 14px;border-radius:8px;font-size:.83rem;margin-top:10px;border:1px solid transparent;font-weight:600}
+.parlay-alert.ok{background:rgba(74,222,128,.1);border-color:rgba(74,222,128,.35);color:#4ade80}
+.parlay-alert.err{background:rgba(248,113,113,.1);border-color:rgba(248,113,113,.35);color:#f87171}
+.parlay-alert.info{background:rgba(59,130,246,.1);border-color:rgba(59,130,246,.35);color:#8ab4f8}
+
+/* Season-record stat band at the top of the tab */
+.parlay-summary-hero{display:flex;align-items:center;justify-content:space-around;flex-wrap:wrap;gap:18px;position:relative;overflow:hidden;background:linear-gradient(135deg,#141b30 0%,#0f1424 100%);border:1px solid #2a3348;border-radius:14px;padding:20px 24px;margin-bottom:20px}
+.parlay-summary-hero::before{content:'';position:absolute;inset:-40%;background:radial-gradient(circle at 15% 20%,rgba(34,197,94,.16),transparent 45%),radial-gradient(circle at 85% 80%,rgba(59,130,246,.16),transparent 45%);pointer-events:none}
+.parlay-summary-stat{position:relative;z-index:1;text-align:center;min-width:90px}
+.parlay-summary-stat .psnum{font-size:1.9rem;font-weight:800;font-family:Georgia,'Times New Roman',serif;line-height:1.1}
+.parlay-summary-stat .pslbl{font-size:.68rem;color:#8a92a8;text-transform:uppercase;letter-spacing:.6px;margin-top:3px}
+
+/* Leaderboard: ranked rows with medal colors + hit-rate bars */
+.parlay-leaderboard{display:flex;flex-direction:column;gap:8px}
+.parlay-lb-row{display:grid;grid-template-columns:32px 1fr auto;align-items:center;gap:12px;background:#161d30;border:1px solid #2a3348;border-radius:10px;padding:10px 14px}
+.parlay-lb-rank{width:28px;height:28px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-weight:800;font-size:.78rem;background:#0f1424;color:#8a92a8;flex-shrink:0}
+.parlay-lb-rank.pr1{background:linear-gradient(135deg,#f5d76e,#c9a227);color:#241b00}
+.parlay-lb-rank.pr2{background:linear-gradient(135deg,#dfe1e8,#a9adba);color:#1a1a1f}
+.parlay-lb-rank.pr3{background:linear-gradient(135deg,#e0a06a,#a8622f);color:#241300}
+.parlay-lb-name{font-weight:700;font-size:.9rem}
+.parlay-lb-bar-track{height:5px;border-radius:4px;background:#0f1424;overflow:hidden;margin-top:6px}
+.parlay-lb-bar-fill{height:100%;border-radius:4px;background:linear-gradient(90deg,#3b82f6,#22c55e)}
+.parlay-lb-right{text-align:right;flex-shrink:0}
+.parlay-lb-rate{font-weight:800;font-size:1.05rem;font-family:Georgia,'Times New Roman',serif}
+.parlay-lb-record{color:#8a92a8;font-size:.72rem;white-space:nowrap}
+
+/* Weekly breakdown as "parlay slip" ticket cards */
+.parlay-slip{background:#161d30;border:1px solid #2a3348;border-radius:12px;overflow:hidden;margin-bottom:14px}
+.parlay-slip-head{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:12px 16px;border-bottom:1px dashed #2a3348}
+.parlay-slip-title{font-weight:700;font-family:Georgia,'Times New Roman',serif;font-size:.95rem}
+.parlay-slip-status{font-size:.68rem;font-weight:800;letter-spacing:.5px;text-transform:uppercase;padding:4px 12px;border-radius:20px;white-space:nowrap}
+.parlay-slip-status.st-hit{background:rgba(74,222,128,.18);color:#4ade80}
+.parlay-slip-status.st-miss{background:rgba(248,113,113,.18);color:#f87171}
+.parlay-slip-status.st-pending{background:rgba(59,130,246,.18);color:#3b82f6}
+.parlay-leg{display:flex;align-items:center;gap:12px;padding:9px 16px}
+.parlay-leg:not(:last-child){border-bottom:1px solid #1a2138}
+.parlay-leg-icon{width:22px;height:22px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:.7rem;flex-shrink:0;font-weight:800}
+.parlay-leg-icon.ic-hit{background:rgba(74,222,128,.18);color:#4ade80}
+.parlay-leg-icon.ic-miss{background:rgba(248,113,113,.18);color:#f87171}
+.parlay-leg-icon.ic-pending{background:rgba(138,146,168,.18);color:#8a92a8}
+.parlay-leg-body{flex:1;min-width:0}
+.parlay-leg-manager{font-size:.68rem;color:#8a92a8;text-transform:uppercase;letter-spacing:.4px}
+.parlay-leg-pick{font-weight:600;font-size:.9rem}
+
 @media (max-width:640px){
   .h2h-picker{flex-direction:column;align-items:stretch}
   .parlay-entry-row{grid-template-columns:1fr}
+  .parlay-builder-row{grid-template-columns:22px 1fr;grid-template-areas:"num manager" ". pick" ". result" ". remove";row-gap:6px}
+  .parlay-builder-num{grid-area:num}
+  .parlay-summary-hero{justify-content:center;text-align:center}
 }
 """
 
@@ -1379,6 +1441,26 @@ function populatePickSelect(pickEl, manager, currentPick){
     opts += '<option value="' + escHtml(currentPick) + '" selected>' + escHtml(currentPick) + ' (not on current roster)</option>';
   }
   pickEl.innerHTML = '<option value="">' + (manager ? 'Select player…' : 'Select manager first…') + '</option>' + opts;
+}
+function updateParlayProgress(prefix){
+  var wrap = document.getElementById(prefix === 'px' ? 'parlayLegRows' : 'shLegRows');
+  var fill = document.getElementById(prefix + 'ProgressFill');
+  var lbl = document.getElementById(prefix + 'ProgressLabel');
+  if (!wrap || !fill || !lbl) return;
+  var rows = wrap.querySelectorAll('.parlay-builder-row');
+  var total = rows.length, filled = 0;
+  rows.forEach(function(row){
+    var mgr = row.querySelector('.' + prefix + '-manager');
+    var pick = row.querySelector('.' + prefix + '-pick');
+    if (mgr && pick && mgr.value && pick.value) filled++;
+  });
+  fill.style.width = (total ? Math.round((filled / total) * 100) : 0) + '%';
+  lbl.textContent = filled + ' / ' + total + ' legs filled';
+}
+function setParlayAlert(elId, message, type){
+  var el = document.getElementById(elId);
+  if (!el) return;
+  el.innerHTML = message ? '<div class="parlay-alert ' + (type || 'info') + '">' + escHtml(message) + '</div>' : '';
 }
 function updateBestParlayPickerCard(stats){
   // Fills the Superlatives tab's "Best Parlay Picker" card once live parlay
@@ -1428,7 +1510,8 @@ function addParlayLegRow(manager, pick, result){
   var wrap = document.getElementById('parlayLegRows');
   if(!wrap) return;
   var row = document.createElement('div');
-  row.className = 'parlay-entry-row';
+  row.className = 'parlay-builder-row';
+  var num = wrap.children.length + 1;
   var managers = Object.keys(window.MANAGER_ROSTERS || {}).sort();
   var mgrOpts = '<option value="">Select manager…</option>' + managers.map(function(m){
     return '<option value="' + escHtml(m) + '"' + (m === manager ? ' selected' : '') + '>' + escHtml(m) + '</option>';
@@ -1437,12 +1520,16 @@ function addParlayLegRow(manager, pick, result){
     return "<option value='"+r+"'"+(r===(result||'pending')?' selected':'')+">"+r+"</option>";
   }).join('');
   row.innerHTML =
+    `<div class="parlay-builder-num">${num}</div>` +
     `<select class="px-manager" onchange="onParlayRowManagerChange(this)">${mgrOpts}</select>` +
     `<select class="px-pick"></select>` +
     `<select class="px-result">${resultOpts}</select>` +
-    `<button type="button" onclick="this.parentNode.remove()">&times;</button>`;
+    `<button type="button" class="btn-remove" onclick="this.parentNode.remove();updateParlayProgress('px');">&times;</button>`;
   wrap.appendChild(row);
   populatePickSelect(row.querySelector('.px-pick'), manager || '', pick || '');
+  row.querySelector('.px-manager').addEventListener('change', function(){ updateParlayProgress('px'); });
+  row.querySelector('.px-pick').addEventListener('change', function(){ updateParlayProgress('px'); });
+  updateParlayProgress('px');
 }
 function onParlayRowManagerChange(sel){
   var row = sel.parentNode;
@@ -1478,14 +1565,13 @@ function loadParlayWeek(){
     var l = legs[j] || {};
     addParlayLegRow(l.manager, l.pick, l.result);
   }
-  document.getElementById('parlayStatus').textContent = found ? 'Loaded existing week — edit and save to update it.' : 'New week — fill in legs, then Save Draft.';
+  setParlayAlert('parlayStatus', found ? 'Loaded existing week — edit and save to update it.' : 'New week — fill in legs, then Save Draft.', 'info');
 }
 function saveParlayWeek(){
   var season = parseInt(document.getElementById('pxSeason').value, 10);
   var week = parseInt(document.getElementById('pxWeek').value, 10);
-  var status = document.getElementById('parlayStatus');
-  if (!season || !week){ status.textContent = 'Enter a season and week first.'; return; }
-  var rows = document.querySelectorAll('#parlayLegRows .parlay-entry-row');
+  if (!season || !week){ setParlayAlert('parlayStatus', 'Enter a season and week first.', 'err'); return; }
+  var rows = document.querySelectorAll('#parlayLegRows .parlay-builder-row');
   var legs = [];
   rows.forEach(function(row){
     var manager = row.querySelector('.px-manager').value.trim();
@@ -1499,7 +1585,7 @@ function saveParlayWeek(){
   var entry = {season: season, week: week, legs: legs};
   if (idx >= 0) draft[idx] = entry; else draft.push(entry);
   saveParlayDraft(draft);
-  status.textContent = 'Saved to this browser (' + legs.length + ' legs). Download the file below to make it permanent.';
+  setParlayAlert('parlayStatus', 'Saved to this browser (' + legs.length + ' legs). Download the file below to make it permanent.', 'ok');
 }
 function downloadParlayJSON(){
   var all = mergedParlayWeeks();
@@ -1511,10 +1597,6 @@ function downloadParlayJSON(){
   URL.revokeObjectURL(url);
 }
 if (document.getElementById('parlayLegRows')) { loadParlayWeek(); }
-
-function parlayBadgeCls(result){
-  return result === 'hit' ? 'badge-clinched' : (result === 'miss' ? 'badge-eliminated' : 'badge-hunt');
-}
 
 /* ---------- Weekly Parlay (Google Sheets / Apps Script-backed live version) ---------- */
 function sheetsUrl(params){
@@ -1539,28 +1621,25 @@ function loadParlaySheets(){
       console.error(err);
     });
 }
+function parlayLegIcon(result){
+  if (result === 'hit') return ['&#10003;', 'ic-hit'];
+  if (result === 'miss') return ['&#10007;', 'ic-miss'];
+  return ['&#8226;', 'ic-pending'];
+}
 function renderParlaySheets(data){
   var statusEl = document.getElementById('parlaySheetStatus');
+  var heroEl = document.getElementById('parlaySheetHero');
   var summaryEl = document.getElementById('parlaySheetSummary');
   var weeklyEl = document.getElementById('parlaySheetWeekly');
   var legs = data.legs || [];
   if (!legs.length){
     statusEl.textContent = 'No parlay data yet — fill in a week below and Submit Week to get started.';
+    heroEl.innerHTML = '';
     summaryEl.innerHTML = '';
     weeklyEl.innerHTML = '';
     return;
   }
   statusEl.textContent = '';
-  var stats = (data.stats || []).slice().sort(function(a,b){
-    var ra = a.hit_rate_pct == null ? -1 : a.hit_rate_pct, rb = b.hit_rate_pct == null ? -1 : b.hit_rate_pct;
-    return rb - ra;
-  });
-  updateBestParlayPickerCard(stats);
-  var lbRows = stats.map(function(s){
-    return '<tr><td>' + escHtml(s.manager) + '</td><td>' + s.hits + '-' + s.misses + '</td><td>' + (s.hit_rate_pct == null ? '—' : s.hit_rate_pct + '%') + '</td></tr>';
-  }).join('');
-  summaryEl.innerHTML = '<h3 class="playoff-col-title" style="margin:18px 0 10px">Leg Leaderboard</h3>' +
-    '<table><thead><tr><th>Manager</th><th>Record</th><th>Hit Rate</th></tr></thead><tbody>' + lbRows + '</tbody></table>';
 
   var byWeek = {};
   legs.forEach(function(l){
@@ -1570,26 +1649,64 @@ function renderParlaySheets(data){
   });
   var weeksSorted = Object.keys(byWeek).map(function(k){ return byWeek[k]; })
     .sort(function(a,b){ return (b.season - a.season) || (b.week - a.week); });
-  weeklyEl.innerHTML = weeksSorted.map(function(w){
+
+  var parlaysHit = 0, parlaysDecided = 0;
+  weeksSorted.forEach(function(w){
     var results = w.legs.map(function(l){ return l.result; });
-    var outcome = results.length && results.every(function(r){ return r === 'hit'; }) ? 'hit'
+    w.outcome = results.length && results.every(function(r){ return r === 'hit'; }) ? 'hit'
       : (results.some(function(r){ return r === 'miss'; }) ? 'miss' : 'pending');
-    var rows = w.legs.map(function(l){
-      return '<tr><td>' + escHtml(l.manager) + '</td><td>' + escHtml(l.pick) + '</td><td><span class="playoff-badge ' + parlayBadgeCls(l.result) + '">' + l.result + '</span></td></tr>';
+    if (w.outcome !== 'pending'){ parlaysDecided++; if (w.outcome === 'hit') parlaysHit++; }
+  });
+  var rate = parlaysDecided ? Math.round((parlaysHit / parlaysDecided) * 100) : 0;
+  heroEl.innerHTML =
+    '<div class="parlay-summary-hero">' +
+      '<div class="parlay-summary-stat"><div class="psnum">' + parlaysHit + '-' + (parlaysDecided - parlaysHit) + '</div><div class="pslbl">Season Record</div></div>' +
+      '<div class="parlay-summary-stat"><div class="psnum">' + rate + '%</div><div class="pslbl">Perfect-Week Rate</div></div>' +
+      '<div class="parlay-summary-stat"><div class="psnum">' + weeksSorted.length + '</div><div class="pslbl">Weeks Tracked</div></div>' +
+    '</div>';
+
+  var stats = (data.stats || []).slice().sort(function(a,b){
+    var ra = a.hit_rate_pct == null ? -1 : a.hit_rate_pct, rb = b.hit_rate_pct == null ? -1 : b.hit_rate_pct;
+    return rb - ra;
+  });
+  updateBestParlayPickerCard(stats);
+  var maxHits = stats.reduce(function(m,s){ return Math.max(m, s.hits); }, 0);
+  var lbRows = stats.map(function(s, i){
+    var rank = i + 1;
+    var rankCls = rank <= 3 ? ' pr' + rank : '';
+    var barPct = maxHits ? Math.round((s.hits / maxHits) * 100) : 0;
+    return '<div class="parlay-lb-row">' +
+      '<div class="parlay-lb-rank' + rankCls + '">' + rank + '</div>' +
+      '<div><div class="parlay-lb-name">' + escHtml(s.manager) + '</div>' +
+        '<div class="parlay-lb-bar-track"><div class="parlay-lb-bar-fill" style="width:' + barPct + '%"></div></div></div>' +
+      '<div class="parlay-lb-right"><div class="parlay-lb-rate">' + (s.hit_rate_pct == null ? '—' : s.hit_rate_pct + '%') + '</div>' +
+        '<div class="parlay-lb-record">' + s.hits + '-' + s.misses + '</div></div>' +
+    '</div>';
+  }).join('');
+  summaryEl.innerHTML = '<h3 class="playoff-col-title" style="margin:18px 0 10px">Leg Leaderboard</h3>' +
+    '<div class="parlay-leaderboard">' + lbRows + '</div>';
+
+  weeklyEl.innerHTML = weeksSorted.map(function(w){
+    var legsHtml = w.legs.map(function(l){
+      var iconInfo = parlayLegIcon(l.result);
+      return '<div class="parlay-leg">' +
+        '<div class="parlay-leg-icon ' + iconInfo[1] + '">' + iconInfo[0] + '</div>' +
+        '<div class="parlay-leg-body"><div class="parlay-leg-manager">' + escHtml(l.manager) + '</div>' +
+        '<div class="parlay-leg-pick">' + escHtml(l.pick) + '</div></div></div>';
     }).join('');
-    return '<div class="record-card" style="text-align:left;margin-bottom:14px">' +
-      '<div class="record-label">Week ' + w.week + ', ' + w.season + ' <span class="playoff-badge ' + parlayBadgeCls(outcome) + '">' + outcome + '</span></div>' +
-      '<table><thead><tr><th>Manager</th><th>Pick</th><th>Result</th></tr></thead><tbody>' + rows + '</tbody></table></div>';
+    return '<div class="parlay-slip">' +
+      '<div class="parlay-slip-head"><div class="parlay-slip-title">Week ' + w.week + ', ' + w.season + '</div>' +
+      '<div class="parlay-slip-status st-' + w.outcome + '">' + w.outcome + '</div></div>' +
+      '<div>' + legsHtml + '</div></div>';
   }).join('');
 }
 function loadParlayWeekSheets(){
   var season = parseInt(document.getElementById('shSeason').value, 10);
   var week = parseInt(document.getElementById('shWeek').value, 10);
   var wrap = document.getElementById('shLegRows');
-  var status = document.getElementById('shFormStatus');
-  if (!wrap || !status) return;
-  if (!season || !week){ status.textContent = 'Enter a season and week first.'; return; }
-  status.textContent = 'Loading…';
+  if (!wrap) return;
+  if (!season || !week){ setParlayAlert('shFormStatus', 'Enter a season and week first.', 'err'); return; }
+  setParlayAlert('shFormStatus', 'Loading…', 'info');
   fetch(sheetsUrl({action: 'all'}))
     .then(function(r){ return r.json(); })
     .then(function(data){
@@ -1601,17 +1718,18 @@ function loadParlayWeekSheets(){
         var l = legs[i] || {};
         addSheetsLegRow(l.manager, l.pick, l.result);
       }
-      status.textContent = legs.length
+      setParlayAlert('shFormStatus', legs.length
         ? ('Loaded ' + legs.length + ' existing leg' + (legs.length === 1 ? '' : 's') + ' — edit and Submit Week to update.')
-        : 'New week — fill in legs, then Submit Week.';
+        : 'New week — fill in legs, then Submit Week.', 'info');
     })
-    .catch(function(err){ status.textContent = 'Could not load that week.'; console.error(err); });
+    .catch(function(err){ setParlayAlert('shFormStatus', 'Could not load that week.', 'err'); console.error(err); });
 }
 function addSheetsLegRow(manager, pick, result){
   var wrap = document.getElementById('shLegRows');
   if (!wrap) return;
   var row = document.createElement('div');
-  row.className = 'parlay-entry-row';
+  row.className = 'parlay-builder-row';
+  var num = wrap.children.length + 1;
   var managers = Object.keys(window.MANAGER_ROSTERS || {}).sort();
   var mgrOpts = '<option value="">Select manager…</option>' + managers.map(function(m){
     return '<option value="' + escHtml(m) + '"' + (m === manager ? ' selected' : '') + '>' + escHtml(m) + '</option>';
@@ -1620,22 +1738,24 @@ function addSheetsLegRow(manager, pick, result){
     return '<option value="' + r + '"' + (r === (result || 'pending') ? ' selected' : '') + '>' + r + '</option>';
   }).join('');
   row.innerHTML =
+    `<div class="parlay-builder-num">${num}</div>` +
     `<select class="sh-manager" onchange="onSheetsRowManagerChange(this)">${mgrOpts}</select>` +
-    `<select class="sh-pick"></select>` +
+    `<select class="sh-pick" onchange="updateParlayProgress('sh')"></select>` +
     `<select class="sh-result">${resultOpts}</select>` +
-    `<button type="button" onclick="this.parentNode.remove()">&times;</button>`;
+    `<button type="button" class="btn-remove" onclick="this.parentNode.remove();updateParlayProgress('sh')">&times;</button>`;
   wrap.appendChild(row);
   populatePickSelect(row.querySelector('.sh-pick'), manager || '', pick || '');
+  updateParlayProgress('sh');
 }
 function onSheetsRowManagerChange(sel){
   populatePickSelect(sel.parentNode.querySelector('.sh-pick'), sel.value, '');
+  updateParlayProgress('sh');
 }
 function submitParlayWeekSheets(){
   var season = parseInt(document.getElementById('shSeason').value, 10);
   var week = parseInt(document.getElementById('shWeek').value, 10);
-  var status = document.getElementById('shFormStatus');
-  if (!season || !week){ status.textContent = 'Enter a season and week first.'; return; }
-  var rows = document.querySelectorAll('#shLegRows .parlay-entry-row');
+  if (!season || !week){ setParlayAlert('shFormStatus', 'Enter a season and week first.', 'err'); return; }
+  var rows = document.querySelectorAll('#shLegRows .parlay-builder-row');
   var legs = [];
   rows.forEach(function(row){
     var manager = row.querySelector('.sh-manager').value.trim();
@@ -1643,8 +1763,8 @@ function submitParlayWeekSheets(){
     var result = row.querySelector('.sh-result').value;
     if (manager && pick) legs.push({manager: manager, pick: pick, result: result});
   });
-  if (!legs.length){ status.textContent = 'Fill in at least one leg (manager + pick) before submitting.'; return; }
-  status.textContent = 'Submitting…';
+  if (!legs.length){ setParlayAlert('shFormStatus', 'Fill in at least one leg (manager + pick) before submitting.', 'err'); return; }
+  setParlayAlert('shFormStatus', 'Submitting…', 'info');
   fetch(window.SHEETS_WEBAPP_URL, {
     method: 'POST',
     headers: {'Content-Type': 'text/plain;charset=utf-8'}, // avoids a CORS preflight Apps Script can't handle
@@ -1652,10 +1772,10 @@ function submitParlayWeekSheets(){
   }).then(function(r){ return r.json(); })
     .then(function(data){
       if (!data.ok) throw new Error(data.error || 'submit failed');
-      status.textContent = 'Submitted ' + legs.length + ' leg' + (legs.length === 1 ? '' : 's') + ' for Week ' + week + ', ' + season + '.';
+      setParlayAlert('shFormStatus', 'Submitted ' + legs.length + ' leg' + (legs.length === 1 ? '' : 's') + ' for Week ' + week + ', ' + season + '.', 'ok');
       loadParlaySheets(); // refresh the leaderboard/weekly breakdown below
     })
-    .catch(function(err){ status.textContent = 'Could not submit: ' + err.message; });
+    .catch(function(err){ setParlayAlert('shFormStatus', 'Could not submit: ' + err.message, 'err'); });
 }
 if (window.SHEETS_WEBAPP_URL) { loadParlaySheets(); loadParlayWeekSheets(); }
 """
@@ -1951,6 +2071,7 @@ def render_parlay_sheets(model):
     return f"""<h2 class="section-title">Weekly Parlay</h2>
     <p class="section-note">Live via Google Sheets.</p>
     <div id="parlaySheetStatus" class="section-note">Loading&hellip;</div>
+    <div id="parlaySheetHero"></div>
     <div id="parlaySheetSummary"></div>
 
     <h3 class="playoff-col-title" style="margin:24px 0 10px">Enter / Edit a Week</h3>
@@ -1961,14 +2082,18 @@ def render_parlay_sheets(model):
       <div class="parlay-entry-row parlay-entry-header">
         <input type="number" id="shSeason" placeholder="Season" value="{model['season']}">
         <input type="number" id="shWeek" placeholder="Week" value="{model['current_week']}">
-        <button type="button" onclick="loadParlayWeekSheets()">Load Week</button>
+        <button type="button" class="btn-secondary" onclick="loadParlayWeekSheets()">Load Week</button>
+      </div>
+      <div class="parlay-progress-wrap">
+        <div class="parlay-progress"><div class="parlay-progress-fill" id="shProgressFill" style="width:0%"></div></div>
+        <div class="parlay-progress-label" id="shProgressLabel">0 / 12 legs filled</div>
       </div>
       <div id="shLegRows"></div>
       <div class="parlay-entry-actions">
-        <button type="button" onclick="addSheetsLegRow()">+ Add Leg</button>
-        <button type="button" onclick="submitParlayWeekSheets()">Submit Week</button>
+        <button type="button" class="btn-secondary" onclick="addSheetsLegRow()">+ Add Leg</button>
+        <button type="button" class="btn-primary" onclick="submitParlayWeekSheets()">Submit Week</button>
       </div>
-      <p id="shFormStatus" class="section-note"></p>
+      <div id="shFormStatus"></div>
     </div>
 
     <h3 class="playoff-col-title" style="margin:24px 0 10px">Weekly Breakdown</h3>
@@ -1978,6 +2103,10 @@ def render_parlay_sheets(model):
       window.SHEETS_WEBAPP_URL = {json.dumps(SHEETS_WEBAPP_URL)};
       window.MANAGER_ROSTERS = {manager_rosters_json};
     </script>"""
+
+
+def _parlay_result_icon(result):
+    return {"hit": ("&#10003;", "ic-hit"), "miss": ("&#10007;", "ic-miss")}.get(result, ("&#8226;", "ic-pending"))
 
 
 def render_parlay_local(weeks, model):
@@ -1999,28 +2128,39 @@ def render_parlay_local(weeks, model):
     if summary:
         decided = summary["parlays_decided"]
         rate = (summary["parlays_hit"] / decided * 100) if decided else 0
-        header += (f"<p class='section-note'>Season parlay record: {summary['parlays_hit']}-{decided - summary['parlays_hit']} "
-                   f"({rate:.0f}% of weeks hit all 12 legs)</p>")
-        lb_rows = "".join(
-            f"<tr><td>{esc(r['manager'])}</td><td>{r['hits']}-{r['misses']}</td><td>{r['rate']}%</td></tr>"
-            for r in summary["leaderboard"]
-        )
+        header += f"""<div class="parlay-summary-hero">
+          <div class="parlay-summary-stat"><div class="psnum">{summary['parlays_hit']}-{decided - summary['parlays_hit']}</div><div class="pslbl">Season Record</div></div>
+          <div class="parlay-summary-stat"><div class="psnum">{rate:.0f}%</div><div class="pslbl">Perfect-Week Rate</div></div>
+          <div class="parlay-summary-stat"><div class="psnum">{len(summary['weekly'])}</div><div class="pslbl">Weeks Tracked</div></div>
+        </div>"""
+
+        max_hits = max((r["hits"] for r in summary["leaderboard"]), default=0)
+        lb_rows = []
+        for i, r in enumerate(summary["leaderboard"], 1):
+            rank_cls = f" pr{i}" if i <= 3 else ""
+            bar_pct = round((r["hits"] / max_hits * 100), 1) if max_hits else 0
+            lb_rows.append(f"""<div class="parlay-lb-row">
+              <div class="parlay-lb-rank{rank_cls}">{i}</div>
+              <div><div class="parlay-lb-name">{esc(r['manager'])}</div>
+                <div class="parlay-lb-bar-track"><div class="parlay-lb-bar-fill" style="width:{bar_pct}%"></div></div></div>
+              <div class="parlay-lb-right"><div class="parlay-lb-rate">{r['rate']}%</div><div class="parlay-lb-record">{r['hits']}-{r['misses']}</div></div>
+            </div>""")
         lb_html = (f"<h3 class='playoff-col-title' style='margin:18px 0 10px'>Leg Leaderboard</h3>"
-                   f"<table><thead><tr><th>Manager</th><th>Record</th><th>Hit Rate</th></tr></thead><tbody>{lb_rows}</tbody></table>")
-        badge_cls = {"hit": "badge-clinched", "miss": "badge-eliminated", "pending": "badge-hunt"}
+                   f"<div class='parlay-leaderboard'>{''.join(lb_rows)}</div>")
+
         weeks_html = []
         for wk in reversed(summary["weekly"]):
-            legs_rows = "".join(
-                f"<tr><td>{esc(l.get('manager', ''))}</td><td>{esc(l.get('pick', ''))}</td>"
-                f"<td><span class='playoff-badge {badge_cls.get(l.get('result'), 'badge-hunt')}'>{esc((l.get('result') or 'pending').title())}</span></td></tr>"
+            legs_html = "".join(
+                (lambda icon, cls: f"""<div class="parlay-leg">
+                  <div class="parlay-leg-icon {cls}">{icon}</div>
+                  <div class="parlay-leg-body"><div class="parlay-leg-manager">{esc(l.get('manager',''))}</div>
+                  <div class="parlay-leg-pick">{esc(l.get('pick',''))}</div></div></div>""")(*_parlay_result_icon(l.get("result")))
                 for l in wk["legs"]
             )
-            weeks_html.append(
-                f"<div class='record-card' style='text-align:left;margin-bottom:14px'>"
-                f"<div class='record-label'>Week {wk['week']}, {wk['season']} "
-                f"<span class='playoff-badge {badge_cls.get(wk['outcome'], 'badge-hunt')}'>{wk['outcome'].title()}</span></div>"
-                f"<table><thead><tr><th>Manager</th><th>Pick</th><th>Result</th></tr></thead><tbody>{legs_rows}</tbody></table></div>"
-            )
+            weeks_html.append(f"""<div class="parlay-slip">
+              <div class="parlay-slip-head"><div class="parlay-slip-title">Week {wk['week']}, {wk['season']}</div>
+              <div class="parlay-slip-status st-{wk['outcome']}">{esc(wk['outcome'].title())}</div></div>
+              <div>{legs_html}</div></div>""")
         body_html = lb_html + "<h3 class='playoff-col-title' style='margin:18px 0 10px'>Weekly Breakdown</h3>" + "".join(weeks_html)
     else:
         header += (f"<p class='section-note'>No parlay data yet — use the entry form below to add this week's legs, "
@@ -2039,15 +2179,19 @@ def render_parlay_local(weeks, model):
       <div class="parlay-entry-row parlay-entry-header">
         <input type="number" id="pxSeason" placeholder="Season" value="{model['season']}">
         <input type="number" id="pxWeek" placeholder="Week" value="{model['current_week']}">
-        <button type="button" onclick="loadParlayWeek()">Load Week</button>
+        <button type="button" class="btn-secondary" onclick="loadParlayWeek()">Load Week</button>
+      </div>
+      <div class="parlay-progress-wrap">
+        <div class="parlay-progress"><div class="parlay-progress-fill" id="pxProgressFill" style="width:0%"></div></div>
+        <div class="parlay-progress-label" id="pxProgressLabel">0 / 12 legs filled</div>
       </div>
       <div id="parlayLegRows"></div>
       <div class="parlay-entry-actions">
-        <button type="button" onclick="addParlayLegRow()">+ Add Leg</button>
-        <button type="button" onclick="saveParlayWeek()">Save Draft (this browser)</button>
-        <button type="button" onclick="downloadParlayJSON()">Download Updated {esc(PARLAY_FILE)}</button>
+        <button type="button" class="btn-secondary" onclick="addParlayLegRow()">+ Add Leg</button>
+        <button type="button" class="btn-secondary" onclick="saveParlayWeek()">Save Draft (this browser)</button>
+        <button type="button" class="btn-primary" onclick="downloadParlayJSON()">Download Updated {esc(PARLAY_FILE)}</button>
       </div>
-      <p id="parlayStatus" class="section-note"></p>
+      <div id="parlayStatus"></div>
     </div>
     <script>
       window.MANAGER_ROSTERS = {manager_rosters_json};
