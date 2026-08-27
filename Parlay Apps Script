@@ -1,0 +1,217 @@
+/**
+ * Weekly Parlay tracker — Google Apps Script backend
+ * =====================================================
+ * Deploy this bound to a Google Sheet (Extensions > Apps Script from inside
+ * the sheet) to get a free, quota-free backend for the dashboard's Weekly
+ * Parlay tab — no Supabase/Firebase/etc. project needed.
+ *
+ * ONE-TIME SETUP (do this once, in the Apps Script editor):
+ *   1. Extensions > Apps Script (from inside the Google Sheet this will live in).
+ *   2. Delete the placeholder code and paste this whole file in.
+ *   3. In the function dropdown at the top, select "oneTimeSetup" and click Run.
+ *      - First run: Google will ask you to authorize the script (it's touching
+ *        your own sheet, so this is expected — click through the consent screen).
+ *      - This creates a "Legs" tab with headers and sets a default PIN
+ *        (change-me-1234).
+ *   4. Change the PIN: select "changePinFromEditor" from the function
+ *      dropdown, edit the PIN value on that line below to whatever you want,
+ *      click Run, then feel free to change it back to a placeholder — it's
+ *      only run once to set the stored PIN, the text in the editor afterward
+ *      doesn't matter.
+ *   5. Deploy > New deployment > select type "Web app".
+ *        - Execute as: Me
+ *        - Who has access: Anyone
+ *      Click Deploy, authorize again if prompted, and copy the Web App URL
+ *      (ends in /exec). That URL is the ONLY thing that goes into the
+ *      dashboard's SHEETS_WEBAPP_URL config — no API key, no credentials,
+ *      no sharing the sheet itself with anyone.
+ *   6. Whenever you edit this script, you must create a NEW deployment
+ *      version (Deploy > Manage deployments > pencil icon > New version) for
+ *      changes to take effect on the existing URL.
+ *
+ * SECURITY MODEL:
+ *   - Anyone with the Web App URL can read all legs and submit/edit a leg
+ *     under any manager name (there's no login, so identity is trust-based —
+ *     fine for a small private league, same trade-off as the Supabase
+ *     version had). Submitting NEVER touches the "result" field.
+ *   - Only grade_leg() can set a result, and it's gated behind a PIN stored
+ *     in PropertiesService (Apps Script's private key-value store) — never
+ *     returned by any endpoint, never visible in the sheet itself.
+ *   - The sheet's actual owner never has to share Edit access with anyone;
+ *     the deployed Web App writes on their behalf without exposing their
+ *     account.
+ */
+
+var SHEET_NAME = 'Legs';
+var PIN_PROPERTY = 'COMMISH_PIN';
+
+function oneTimeSetup() {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var sheet = ss.getSheetByName(SHEET_NAME);
+  if (!sheet) {
+    sheet = ss.insertSheet(SHEET_NAME);
+  }
+  if (sheet.getLastRow() === 0) {
+    sheet.appendRow(['id', 'season', 'week', 'manager', 'pick', 'result', 'submitted_at', 'updated_at']);
+  }
+  var props = PropertiesService.getScriptProperties();
+  if (!props.getProperty(PIN_PROPERTY)) {
+    props.setProperty(PIN_PROPERTY, 'change-me-1234');
+  }
+  Logger.log('Setup complete. Sheet "' + SHEET_NAME + '" is ready. Default PIN is change-me-1234 — change it with setCommishPin("your-pin") before going live.');
+}
+
+function setCommishPin(pin) {
+  if (!pin) throw new Error('Provide a PIN, e.g. setCommishPin("mySecretPin")');
+  PropertiesService.getScriptProperties().setProperty(PIN_PROPERTY, String(pin));
+  Logger.log('PIN updated.');
+}
+
+// Run this from the editor (select it in the function dropdown, click Run)
+// to change the commissioner PIN — edit the string below first, then run.
+// Only the act of running it matters; the value left in the editor
+// afterward has no effect until you run it again.
+function changePinFromEditor() {
+  setCommishPin('change-me-1234');
+}
+
+function getSheet_() {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var sheet = ss.getSheetByName(SHEET_NAME);
+  if (!sheet) throw new Error('Run oneTimeSetup() first (see the comment at the top of this file).');
+  return sheet;
+}
+
+function readAllLegs_() {
+  var sheet = getSheet_();
+  var values = sheet.getDataRange().getValues();
+  var headers = values[0];
+  var rows = values.slice(1);
+  return rows.filter(function (r) { return r[0]; }).map(function (r) {
+    var obj = {};
+    headers.forEach(function (h, i) { obj[h] = r[i]; });
+    return obj;
+  });
+}
+
+// Manager hit/miss leaderboard + longest streak per manager, computed fresh
+// on every read (small dataset, no need to cache/materialize).
+function computeStats_() {
+  var legs = readAllLegs_();
+  var byManager = {};
+  legs.forEach(function (l) {
+    var m = l.manager;
+    byManager[m] = byManager[m] || { manager: m, hits: 0, misses: 0, pending: 0 };
+    if (l.result === 'hit') byManager[m].hits++;
+    else if (l.result === 'miss') byManager[m].misses++;
+    else byManager[m].pending++;
+  });
+  var stats = Object.keys(byManager).map(function (m) {
+    var s = byManager[m];
+    var decided = s.hits + s.misses;
+    s.hit_rate_pct = decided ? Math.round((s.hits / decided) * 1000) / 10 : null;
+    return s;
+  });
+
+  var gradedByManager = {};
+  legs
+    .filter(function (l) { return l.result === 'hit' || l.result === 'miss'; })
+    .sort(function (a, b) { return (a.season - b.season) || (a.week - b.week); })
+    .forEach(function (l) {
+      gradedByManager[l.manager] = gradedByManager[l.manager] || [];
+      gradedByManager[l.manager].push(l.result);
+    });
+  var streaks = {};
+  Object.keys(gradedByManager).forEach(function (m) {
+    var seq = gradedByManager[m];
+    var longestHit = 0, longestMiss = 0, curType = null, curLen = 0;
+    seq.forEach(function (r) {
+      curLen = (r === curType) ? curLen + 1 : 1;
+      curType = r;
+      if (r === 'hit') longestHit = Math.max(longestHit, curLen);
+      else longestMiss = Math.max(longestMiss, curLen);
+    });
+    streaks[m] = { longest_hit_streak: longestHit, longest_miss_streak: longestMiss };
+  });
+
+  return { stats: stats, streaks: streaks };
+}
+
+function jsonOut_(obj) {
+  return ContentService.createTextOutput(JSON.stringify(obj)).setMimeType(ContentService.MimeType.JSON);
+}
+
+function doGet(e) {
+  var action = (e.parameter && e.parameter.action) || 'all';
+  if (action === 'all' || action === 'read') {
+    var s = computeStats_();
+    return jsonOut_({ ok: true, legs: readAllLegs_(), stats: s.stats, streaks: s.streaks });
+  }
+  return jsonOut_({ ok: false, error: 'unknown action' });
+}
+
+function doPost(e) {
+  var payload;
+  try {
+    payload = JSON.parse(e.postData.contents);
+  } catch (err) {
+    return jsonOut_({ ok: false, error: 'invalid JSON body' });
+  }
+  try {
+    if (payload.action === 'submit_leg') return jsonOut_(submitLeg_(payload));
+    if (payload.action === 'grade_leg') return jsonOut_(gradeLeg_(payload));
+    return jsonOut_({ ok: false, error: 'unknown action' });
+  } catch (err) {
+    return jsonOut_({ ok: false, error: String(err) });
+  }
+}
+
+// Upserts by (season, week, manager) — resubmitting updates your own pick,
+// never touches "result" (grading is a separate, PIN-gated action below).
+function submitLeg_(payload) {
+  var season = Number(payload.season);
+  var week = Number(payload.week);
+  var manager = String(payload.manager || '').trim();
+  var pick = String(payload.pick || '').trim();
+  if (!season || !week) throw new Error('season and week are required');
+  if (!manager) throw new Error('manager is required');
+  if (!pick) throw new Error('pick is required');
+
+  var sheet = getSheet_();
+  var values = sheet.getDataRange().getValues();
+  var now = new Date();
+  for (var i = 1; i < values.length; i++) {
+    var row = values[i];
+    if (Number(row[1]) === season && Number(row[2]) === week &&
+        String(row[3]).trim().toLowerCase() === manager.toLowerCase()) {
+      sheet.getRange(i + 1, 5).setValue(pick); // column E: pick
+      sheet.getRange(i + 1, 8).setValue(now);  // column H: updated_at
+      return { ok: true, id: row[0], action: 'updated' };
+    }
+  }
+  var id = Utilities.getUuid();
+  sheet.appendRow([id, season, week, manager, pick, 'pending', now, now]);
+  return { ok: true, id: id, action: 'inserted' };
+}
+
+// The only path that can set a result — requires the PIN from
+// PropertiesService, which no read endpoint ever exposes.
+function gradeLeg_(payload) {
+  var id = String(payload.id || '');
+  var result = String(payload.result || '');
+  var pin = String(payload.pin || '');
+  if (['pending', 'hit', 'miss'].indexOf(result) === -1) throw new Error('invalid result');
+  var expectedPin = PropertiesService.getScriptProperties().getProperty(PIN_PROPERTY);
+  if (!expectedPin || pin !== expectedPin) throw new Error('invalid pin');
+
+  var sheet = getSheet_();
+  var values = sheet.getDataRange().getValues();
+  for (var i = 1; i < values.length; i++) {
+    if (String(values[i][0]) === id) {
+      sheet.getRange(i + 1, 6).setValue(result);     // column F: result
+      sheet.getRange(i + 1, 8).setValue(new Date());  // column H: updated_at
+      return { ok: true };
+    }
+  }
+  throw new Error('leg not found');
+}

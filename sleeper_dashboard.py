@@ -49,19 +49,39 @@ DRAFT_CAPITAL_YEARS_AHEAD = int(_env_or_default("DRAFT_CAPITAL_YEARS_AHEAD", "3"
 
 # Weekly parlay tracking (1 leg submitted per manager, 12 legs total) lives
 # entirely outside Sleeper's data model — there is no odds/betting endpoint
-# in the public API — so it's sourced from a small, manually-maintained JSON
-# file instead. See load_parlay_weeks() below for the expected file shape.
+# in the public API. Three backends are supported, checked in this priority
+# order:
+#
+#   1. Google Sheets (live, multi-device, no project quotas) — set
+#      SHEETS_WEBAPP_URL to a deployed Apps Script Web App URL. See
+#      parlay_apps_script.gs for the one-time setup this requires (owned by
+#      whoever owns the sheet — no credentials or sheet-sharing needed on
+#      your end, just the deployed URL).
+#   2. Supabase (live, multi-device) — set SUPABASE_URL + SUPABASE_ANON_KEY.
+#      See supabase_parlay_schema.sql for the one-time database setup.
+#   3. Local JSON file + browser localStorage (fallback, single-user) — used
+#      automatically when neither of the above is configured. See
+#      load_parlay_weeks() below for the file format. Fine for a
+#      commissioner entering all 12 legs themselves; doesn't sync across
+#      devices/managers.
 PARLAY_FILE = _env_or_default("PARLAY_FILE", "parlay.json")
+SHEETS_WEBAPP_URL = _env_or_default("SHEETS_WEBAPP_URL", "")
+SUPABASE_URL = _env_or_default("SUPABASE_URL", "")
+SUPABASE_ANON_KEY = _env_or_default("SUPABASE_ANON_KEY", "")
 
-# Superlatives tracked over the course of the season that determine next
-# year's rookie draft order (e.g. "Best Waiver Wire GM", "Least Points Left
-# on Bench"). Left empty until this league's specific definitions are
-# provided — fill in as they're finalized:
-#   SUPERLATIVES = [
-#       {"name": "Bench Tragedy", "description": "Most points stranded on the bench in a single loss",
-#        "leader": "Team Name", "value": "42.3 pts"},
-#   ]
-SUPERLATIVES = []
+# Superlatives: 2 categories.
+#   - STAT_SUPERLATIVE_DEFS: computed automatically every generation from
+#     league data (see compute_stat_superlatives()).
+#   - VOTED_SUPERLATIVES: decided by league vote at season's end — these
+#     stay empty placeholders all season, filled in manually once voted.
+VOTED_SUPERLATIVES = [
+    "Best Trader",
+    "Best Trash Talker",
+    "Best Locker Room Guy",
+    "Wild Card",
+    "Biggest Fall Off",
+    "Most Improved",
+]
 
 # Sleeper's public API does NOT expose real/legal names anywhere — only
 # 'username' and 'display_name' (both user-chosen handles). There is no
@@ -791,6 +811,152 @@ def compute_parlay_summary(weeks):
     return {"weekly": weekly, "leaderboard": leaderboard, "parlays_hit": parlays_hit, "parlays_decided": parlays_decided}
 
 
+def compute_transaction_counts(league_id, max_week):
+    """Total completed transactions per roster this season (waiver adds,
+    free-agent adds, and trades — each party to a trade gets +1). Powers
+    the Most Active / Worst GM superlatives."""
+    counts = {}
+    for w in range(1, max_week + 1):
+        try:
+            txs = api(f"/league/{league_id}/transactions/{w}") or []
+        except Exception:
+            txs = []
+        for tx in txs:
+            if tx.get("status") != "complete":
+                continue
+            roster_ids = set(tx.get("roster_ids") or [])
+            if not roster_ids:
+                adds = tx.get("adds") or {}
+                drops = tx.get("drops") or {}
+                roster_ids = set(adds.values()) | set(drops.values())
+            for rid in roster_ids:
+                counts[rid] = counts.get(rid, 0) + 1
+    return counts
+
+
+def compute_strength_of_schedule(pairs, standings):
+    """
+    Games played against a CURRENTLY top-half opponent, per team — a simple
+    "hardest schedule" proxy. Sleeper doesn't expose historical week-by-week
+    rank, so this uses final/current standings rather than each opponent's
+    strength at the time they were actually played — a reasonable proxy,
+    not a precise point-in-time calculation.
+    """
+    if not standings:
+        return {}
+    team_count = len(standings)
+    top_n = max(1, -(-team_count // 2))  # ceil(team_count / 2)
+    top_ids = {s["roster_id"] for s in standings[:top_n]}
+    counts = {s["roster_id"]: 0 for s in standings}
+    for plist in pairs.values():
+        for a, b in plist:
+            if a in counts and b in top_ids:
+                counts[a] += 1
+            if b in counts and a in top_ids:
+                counts[b] += 1
+    return counts
+
+
+def compute_dookie_bracket_winner(league_id, teams):
+    """Winner of the losers bracket (the 'Dookie Bracket'), once decided."""
+    try:
+        br = api(f"/league/{league_id}/losers_bracket") or []
+    except Exception:
+        br = []
+    decided = [m for m in br if m.get("w") is not None]
+    if not decided:
+        return None
+    final = max(decided, key=lambda m: m.get("r", 0))
+    t = teams.get(final.get("w"))
+    return {"name": t["team_name"], "owner": t.get("owner")} if t else None
+
+
+def compute_stat_superlatives(league_id, teams, standings, pairs, parlay_summary):
+    """
+    The 6 stat-tracked superlatives, computed fresh every generation. Each
+    is a dict shaped like the SUPERLATIVES cards: name, id (for the
+    Best Parlay Picker card's client-side-fill hook, see render_superlatives),
+    description, leader, value.
+    """
+    out = []
+
+    dookie = compute_dookie_bracket_winner(league_id, teams)
+    out.append({
+        "name": "Dookie Bracket Winner", "id": "splat-dookie",
+        "description": "Winner of the losers bracket.",
+        "leader": dookie["name"] if dookie else "TBD", "owner": dookie.get("owner") if dookie else None,
+        "value": "\U0001F4A9" if dookie else "Pending",
+    })
+
+    reg = standings[0] if standings else None
+    out.append({
+        "name": "Regular Season Winner", "id": "splat-regseason",
+        "description": "Best regular season record.",
+        "leader": reg["name"] if reg else "TBD", "owner": reg.get("owner") if reg else None,
+        "value": f"{reg['wins']}-{reg['losses']}" if reg else "",
+    })
+
+    # Every team gets a 0-default entry, not just teams that appear in a
+    # transaction — otherwise a team with zero moves is silently excluded
+    # from the dict entirely and can never win "Worst GM".
+    tx_counts = {rid: 0 for rid in teams}
+    for rid, count in compute_transaction_counts(league_id, MAX_WEEK).items():
+        tx_counts[rid] = count
+    if tx_counts:
+        most_id = max(tx_counts, key=tx_counts.get)
+        least_id = min(tx_counts, key=tx_counts.get)
+        most_team, least_team = teams.get(most_id, {}), teams.get(least_id, {})
+        most_val, least_val = f"{tx_counts[most_id]} moves", f"{tx_counts[least_id]} moves"
+    else:
+        most_team = least_team = {}
+        most_val = least_val = "Pending"
+    out.append({
+        "name": "Most Active", "id": "splat-active",
+        "description": "Most total transactions (waivers + trades) this season.",
+        "leader": most_team.get("team_name", "TBD"), "owner": most_team.get("owner"), "value": most_val,
+    })
+    out.append({
+        "name": "Worst GM", "id": "splat-worstgm",
+        "description": "Fewest total transactions this season.",
+        "leader": least_team.get("team_name", "TBD"), "owner": least_team.get("owner"), "value": least_val,
+    })
+
+    sos = compute_strength_of_schedule(pairs, standings)
+    if sos:
+        hardest_id = max(sos, key=sos.get)
+        hardest_team = teams.get(hardest_id, {})
+        hardest_val = f"{sos[hardest_id]} top-half games"
+    else:
+        hardest_team = {}
+        hardest_val = "Pending"
+    out.append({
+        "name": "Hardest Schedule", "id": "splat-hardsched",
+        "description": "Most matchups against a currently top-half opponent.",
+        "leader": hardest_team.get("team_name", "TBD"), "owner": hardest_team.get("owner"), "value": hardest_val,
+    })
+
+    # Best Parlay Picker: only fully knowable server-side when the parlay
+    # tracker uses the local-file backend (its data is already in `parlay_summary`
+    # at generation time). For the Sheets/Supabase live backends, this card
+    # renders as "Loading…" and is filled in client-side once that tab's data
+    # loads — see the splat-parlay id hooks in the Weekly Parlay JS loaders.
+    if parlay_summary and parlay_summary["leaderboard"]:
+        top = max(parlay_summary["leaderboard"], key=lambda r: (r["hits"], r["rate"]))
+        out.append({
+            "name": "Best Parlay Picker", "id": "splat-parlay",
+            "description": "Most successful legs submitted to the weekly parlay.",
+            "leader": top["manager"], "owner": None, "value": f"{top['hits']} hits ({top['rate']}%)",
+        })
+    else:
+        out.append({
+            "name": "Best Parlay Picker", "id": "splat-parlay",
+            "description": "Most successful legs submitted to the weekly parlay.",
+            "leader": "Loading…", "owner": None, "value": "",
+        })
+
+    return out
+
+
 # --------------------------------------------------------------------------- #
 #  ADAPTER: build a common `model` dict from Sleeper
 # --------------------------------------------------------------------------- #
@@ -1007,6 +1173,10 @@ def build_model():
     # ---- head-to-head lookup (Matchups tab tool) ----
     h2h_lookup = build_h2h_lookup(rivalries, teams, name_by_id)
 
+    # ---- superlatives (stat-tracked ones; voted ones are static, see VOTED_SUPERLATIVES) ----
+    local_parlay_summary = compute_parlay_summary(load_parlay_weeks())
+    stat_superlatives = compute_stat_superlatives(LEAGUE_ID, teams, standings, pairs, local_parlay_summary)
+
     return {
         "league_name": league_name, "platform": "Sleeper", "season": season,
         "current_week": current_week,
@@ -1015,6 +1185,7 @@ def build_model():
         "playoff_spots": playoff_spots, "reg_season_weeks": reg_season_weeks,
         "roster_ages": roster_ages, "player_tenure": player_tenure,
         "draft_capital": draft_capital, "trade_log": trade_log, "h2h": h2h_lookup,
+        "stat_superlatives": stat_superlatives,
     }
 
 
@@ -1151,17 +1322,48 @@ td{padding:9px 10px;border-bottom:1px solid #1f2740}
   .playoff-record{grid-area:record}
   .playoff-detail{grid-area:detail}
   .playoff-badge{grid-area:badge;justify-self:start}
-  .h2h-picker{flex-direction:column;align-items:stretch}
 }
 
 /* ---------- Head-to-Head lookup (Matchups tab) ---------- */
 .h2h-picker{display:flex;align-items:center;gap:12px;margin-bottom:16px}
 .h2h-picker select{background:#1a2138;border:1px solid #2a3348;color:#e6e9f0;padding:8px 12px;border-radius:8px;font-size:.9rem;flex:1}
+
+/* ---------- Weekly Parlay entry form ---------- */
+.parlay-entry{background:#1a2138;border:1px solid #2a3348;border-radius:10px;padding:16px;margin-top:10px}
+.parlay-entry-row{display:grid;grid-template-columns:1fr 2fr auto auto;gap:8px;margin-bottom:8px;align-items:center}
+.parlay-entry-header{grid-template-columns:1fr 1fr auto}
+.parlay-entry-row input,.parlay-entry-row select{background:#0f1424;border:1px solid #2a3348;color:#e6e9f0;padding:7px 10px;border-radius:6px;font-size:.85rem;width:100%}
+.parlay-entry-actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:10px}
+.parlay-entry-actions button,.parlay-entry-row button{background:#3b82f6;color:#fff;border:none;padding:7px 14px;border-radius:6px;cursor:pointer;font-size:.85rem}
+.parlay-entry-row button{background:#f87171;padding:6px 10px}
+@media (max-width:640px){
+  .h2h-picker{flex-direction:column;align-items:stretch}
+  .parlay-entry-row{grid-template-columns:1fr}
+}
 """
 
 JS = """
 function showTab(id,btn){document.querySelectorAll('.tab').forEach(t=>t.classList.remove('active'));document.querySelectorAll('.panel').forEach(p=>p.classList.remove('active'));btn.classList.add('active');document.getElementById(id).classList.add('active');}
 function showSubTab(id,btn){btn.parentNode.querySelectorAll('.subtab').forEach(t=>t.classList.remove('active'));btn.parentNode.parentNode.querySelectorAll('.subpanel').forEach(p=>p.classList.remove('active'));btn.classList.add('active');document.getElementById(id).classList.add('active');}
+function escHtml(s){
+  return String(s == null ? '' : s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+function updateBestParlayPickerCard(stats){
+  // Fills the Superlatives tab's "Best Parlay Picker" card once live parlay
+  // data loads (Sheets/Supabase backends only — the local-file backend's
+  // version is already baked in server-side). No-op if that card isn't on
+  // the page, or there's no data yet.
+  var valueEl = document.getElementById('splat-parlay-value');
+  var leaderEl = document.getElementById('splat-parlay-leader');
+  if (!valueEl || !leaderEl || !stats || !stats.length) return;
+  var top = stats.slice().sort(function(a,b){
+    if (b.hits !== a.hits) return b.hits - a.hits;
+    var ra = a.hit_rate_pct == null ? -1 : a.hit_rate_pct, rb = b.hit_rate_pct == null ? -1 : b.hit_rate_pct;
+    return rb - ra;
+  })[0];
+  valueEl.textContent = top.hits + ' hits (' + (top.hit_rate_pct == null ? '—' : top.hit_rate_pct + '%') + ')';
+  leaderEl.innerHTML = '<div class="team-cell-inner"><div><div class="team-name-main">' + escHtml(top.manager) + '</div></div></div>';
+}
 function updateH2H(){
   var a=document.getElementById('h2hA'), b=document.getElementById('h2hB');
   if(!a||!b||!window.H2H_DATA) return;
@@ -1188,6 +1390,326 @@ function updateH2H(){
   out.innerHTML = html;
 }
 if (document.getElementById('h2hA')) { updateH2H(); }
+
+/* ---------- Weekly Parlay entry form (single-browser draft + export) ---------- */
+function addParlayLegRow(manager, pick, result){
+  var wrap = document.getElementById('parlayLegRows');
+  if(!wrap) return;
+  var row = document.createElement('div');
+  row.className = 'parlay-entry-row';
+  var esc_ = function(s){ return (s||'').replace(/"/g,'&quot;'); };
+  var opts = ['pending','hit','miss'].map(function(r){
+    return "<option value='"+r+"'"+(r===(result||'pending')?' selected':'')+">"+r+"</option>";
+  }).join('');
+  row.innerHTML =
+    `<input list='parlayManagers' placeholder='Manager' class='px-manager' value="${esc_(manager)}">` +
+    `<input placeholder='Pick' class='px-pick' value="${esc_(pick)}">` +
+    `<select class='px-result'>${opts}</select>` +
+    `<button type='button' onclick='this.parentNode.remove()'>&times;</button>`;
+  wrap.appendChild(row);
+}
+function loadParlayDraft(){
+  try { return JSON.parse(localStorage.getItem('parlayDraftWeeks') || '[]'); } catch(e){ return []; }
+}
+function saveParlayDraft(weeks){
+  try { localStorage.setItem('parlayDraftWeeks', JSON.stringify(weeks)); } catch(e){}
+}
+function mergedParlayWeeks(){
+  var base = (window.PARLAY_DATA || []).slice();
+  var draft = loadParlayDraft();
+  draft.forEach(function(dw){
+    var idx = -1;
+    for (var i=0;i<base.length;i++){ if (base[i].season===dw.season && base[i].week===dw.week){ idx=i; break; } }
+    if (idx >= 0) base[idx] = dw; else base.push(dw);
+  });
+  return base;
+}
+function loadParlayWeek(){
+  var season = parseInt(document.getElementById('pxSeason').value, 10);
+  var week = parseInt(document.getElementById('pxWeek').value, 10);
+  var all = mergedParlayWeeks();
+  var found = null;
+  for (var i=0;i<all.length;i++){ if (all[i].season===season && all[i].week===week){ found=all[i]; break; } }
+  var wrap = document.getElementById('parlayLegRows');
+  wrap.innerHTML = '';
+  var legs = (found && found.legs) || [];
+  var count = Math.max(legs.length, 12);
+  for (var j=0;j<count;j++){
+    var l = legs[j] || {};
+    addParlayLegRow(l.manager, l.pick, l.result);
+  }
+  document.getElementById('parlayStatus').textContent = found ? 'Loaded existing week — edit and save to update it.' : 'New week — fill in legs, then Save Draft.';
+}
+function saveParlayWeek(){
+  var season = parseInt(document.getElementById('pxSeason').value, 10);
+  var week = parseInt(document.getElementById('pxWeek').value, 10);
+  var status = document.getElementById('parlayStatus');
+  if (!season || !week){ status.textContent = 'Enter a season and week first.'; return; }
+  var rows = document.querySelectorAll('#parlayLegRows .parlay-entry-row');
+  var legs = [];
+  rows.forEach(function(row){
+    var manager = row.querySelector('.px-manager').value.trim();
+    var pick = row.querySelector('.px-pick').value.trim();
+    var result = row.querySelector('.px-result').value;
+    if (manager || pick) legs.push({manager: manager, pick: pick, result: result});
+  });
+  var draft = loadParlayDraft();
+  var idx = -1;
+  for (var i=0;i<draft.length;i++){ if (draft[i].season===season && draft[i].week===week){ idx=i; break; } }
+  var entry = {season: season, week: week, legs: legs};
+  if (idx >= 0) draft[idx] = entry; else draft.push(entry);
+  saveParlayDraft(draft);
+  status.textContent = 'Saved to this browser (' + legs.length + ' legs). Download the file below to make it permanent.';
+}
+function downloadParlayJSON(){
+  var all = mergedParlayWeeks();
+  var blob = new Blob([JSON.stringify(all, null, 2)], {type: 'application/json'});
+  var url = URL.createObjectURL(blob);
+  var a = document.createElement('a');
+  a.href = url; a.download = window.PARLAY_FILE_NAME || 'parlay.json';
+  document.body.appendChild(a); a.click(); document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
+if (document.getElementById('parlayLegRows')) { loadParlayWeek(); }
+
+/* ---------- Weekly Parlay (Supabase-backed live version) ---------- */
+function sbHeaders(extra){
+  var h = {'apikey': window.SUPABASE_ANON_KEY, 'Authorization': 'Bearer ' + window.SUPABASE_ANON_KEY, 'Content-Type': 'application/json'};
+  if (extra) for (var k in extra) h[k] = extra[k];
+  return h;
+}
+function sbRest(path){
+  var base = window.SUPABASE_URL;
+  if (base.charAt(base.length - 1) === '/') { base = base.slice(0, -1); }
+  return base + '/rest/v1/' + path;
+}
+function sbBadgeCls(result){
+  return result === 'hit' ? 'badge-clinched' : (result === 'miss' ? 'badge-eliminated' : 'badge-hunt');
+}
+function loadParlaySupabase(){
+  var statusEl = document.getElementById('parlaySbStatus');
+  if (!statusEl) return; // not on this tab's markup — Supabase not configured
+  Promise.all([
+    fetch(sbRest('parlay_weeks?select=id,season,week,parlay_legs(id,manager,pick,result)&order=season.asc,week.asc'), {headers: sbHeaders()}).then(function(r){ return r.json(); }),
+    fetch(sbRest('parlay_manager_stats?select=*'), {headers: sbHeaders()}).then(function(r){ return r.json(); }),
+  ]).then(function(results){
+    renderParlaySupabase(results[0] || [], results[1] || []);
+  }).catch(function(err){
+    statusEl.textContent = 'Could not load parlay data — check SUPABASE_URL/SUPABASE_ANON_KEY and that the schema has been run.';
+    console.error(err);
+  });
+}
+function renderParlaySupabase(weeks, stats){
+  var statusEl = document.getElementById('parlaySbStatus');
+  var summaryEl = document.getElementById('parlaySbSummary');
+  var weeklyEl = document.getElementById('parlaySbWeekly');
+  if (!weeks.length){
+    statusEl.textContent = 'No parlay data yet — submit this week\\'s leg below to get started.';
+    summaryEl.innerHTML = '';
+    weeklyEl.innerHTML = '';
+    return;
+  }
+  statusEl.textContent = '';
+  updateBestParlayPickerCard(stats);
+  var lbRows = stats.map(function(s){
+    return '<tr><td>' + escHtml(s.manager) + '</td><td>' + s.hits + '-' + s.misses + '</td><td>' + (s.hit_rate_pct == null ? '—' : s.hit_rate_pct + '%') + '</td></tr>';
+  }).join('');
+  summaryEl.innerHTML = '<h3 class="playoff-col-title" style="margin:18px 0 10px">Leg Leaderboard</h3>' +
+    '<table><thead><tr><th>Manager</th><th>Record</th><th>Hit Rate</th></tr></thead><tbody>' + lbRows + '</tbody></table>';
+
+  var weeksSorted = weeks.slice().sort(function(a,b){ return (b.season - a.season) || (b.week - a.week); });
+  weeklyEl.innerHTML = weeksSorted.map(function(w){
+    var legs = w.parlay_legs || [];
+    var results = legs.map(function(l){ return l.result; });
+    var outcome = results.length && results.every(function(r){ return r === 'hit'; }) ? 'hit'
+      : (results.some(function(r){ return r === 'miss'; }) ? 'miss' : 'pending');
+    var rows = legs.map(function(l){
+      return '<tr><td>' + escHtml(l.manager) + '</td><td>' + escHtml(l.pick) + '</td><td><span class="playoff-badge ' + sbBadgeCls(l.result) + '">' + l.result + '</span></td></tr>';
+    }).join('');
+    return '<div class="record-card" style="text-align:left;margin-bottom:14px">' +
+      '<div class="record-label">Week ' + w.week + ', ' + w.season + ' <span class="playoff-badge ' + sbBadgeCls(outcome) + '">' + outcome + '</span></div>' +
+      '<table><thead><tr><th>Manager</th><th>Pick</th><th>Result</th></tr></thead><tbody>' + rows + '</tbody></table></div>';
+  }).join('');
+}
+function submitParlayLeg(){
+  var season = parseInt(document.getElementById('sbSeason').value, 10);
+  var week = parseInt(document.getElementById('sbWeek').value, 10);
+  var manager = document.getElementById('sbManager').value.trim();
+  var pick = document.getElementById('sbPick').value.trim();
+  var status = document.getElementById('sbSubmitStatus');
+  if (!season || !week || !manager || !pick){ status.textContent = 'Fill in season, week, your name, and your pick.'; return; }
+  status.textContent = 'Submitting…';
+  fetch(sbRest('rpc/submit_leg'), {
+    method: 'POST', headers: sbHeaders(),
+    body: JSON.stringify({p_season: season, p_week: week, p_manager: manager, p_pick: pick}),
+  }).then(function(r){
+    if (!r.ok) return r.json().then(function(e){ throw new Error(e.message || 'submit failed'); });
+    status.textContent = 'Leg submitted for ' + manager + '.';
+    document.getElementById('sbPick').value = '';
+    loadParlaySupabase();
+  }).catch(function(err){
+    status.textContent = 'Could not submit: ' + err.message;
+  });
+}
+function loadParlayGradingWeek(){
+  var season = parseInt(document.getElementById('sbSeason').value, 10);
+  var week = parseInt(document.getElementById('sbWeek').value, 10);
+  var wrap = document.getElementById('parlayGradeRows');
+  if (!season || !week){ wrap.innerHTML = '<p class="empty">Set season/week above first.</p>'; return; }
+  fetch(sbRest('parlay_weeks?select=id,season,week,parlay_legs(id,manager,pick,result)&season=eq.' + season + '&week=eq.' + week), {headers: sbHeaders()})
+    .then(function(r){ return r.json(); })
+    .then(function(rows){
+      var wk = rows[0];
+      if (!wk || !wk.parlay_legs || !wk.parlay_legs.length){ wrap.innerHTML = '<p class="empty">No legs submitted for that week yet.</p>'; return; }
+      wrap.innerHTML = wk.parlay_legs.map(function(l){
+        var opts = ['pending','hit','miss'].map(function(r){ return '<option value="' + r + '"' + (r === l.result ? ' selected' : '') + '>' + r + '</option>'; }).join('');
+        return `<div class="parlay-entry-row">
+          <span>${escHtml(l.manager)}</span>
+          <span>${escHtml(l.pick)}</span>
+          <select id="grade-${l.id}">${opts}</select>
+          <button type="button" onclick="gradeParlayLeg(${l.id})">Save</button>
+          </div>`;
+      }).join('');
+    })
+    .catch(function(err){ wrap.innerHTML = '<p class="empty">Could not load that week.</p>'; console.error(err); });
+}
+function gradeParlayLeg(legId){
+  var pin = document.getElementById('sbPin').value;
+  var result = document.getElementById('grade-' + legId).value;
+  if (!pin){ alert('Enter the commissioner PIN first.'); return; }
+  fetch(sbRest('rpc/grade_leg'), {
+    method: 'POST', headers: sbHeaders(),
+    body: JSON.stringify({p_leg_id: legId, p_result: result, p_pin: pin}),
+  }).then(function(r){
+    if (!r.ok) return r.json().then(function(e){ throw new Error(e.message || 'grade failed'); });
+    loadParlaySupabase();
+  }).catch(function(err){ alert('Could not grade leg: ' + err.message); });
+}
+if (window.SUPABASE_URL && window.SUPABASE_ANON_KEY) { loadParlaySupabase(); }
+
+/* ---------- Weekly Parlay (Google Sheets / Apps Script-backed live version) ---------- */
+function sheetsUrl(params){
+  var url = window.SHEETS_WEBAPP_URL;
+  if (params){
+    var qs = Object.keys(params).map(function(k){ return encodeURIComponent(k) + '=' + encodeURIComponent(params[k]); }).join('&');
+    url += (url.indexOf('?') === -1 ? '?' : '&') + qs;
+  }
+  return url;
+}
+function loadParlaySheets(){
+  var statusEl = document.getElementById('parlaySheetStatus');
+  if (!statusEl) return; // not on this tab's markup — Sheets backend not configured
+  fetch(sheetsUrl({action: 'all'}))
+    .then(function(r){ return r.json(); })
+    .then(function(data){
+      if (!data.ok) throw new Error(data.error || 'load failed');
+      renderParlaySheets(data);
+    })
+    .catch(function(err){
+      statusEl.textContent = 'Could not load parlay data — check SHEETS_WEBAPP_URL and that the Apps Script is deployed as "Anyone" access.';
+      console.error(err);
+    });
+}
+function renderParlaySheets(data){
+  var statusEl = document.getElementById('parlaySheetStatus');
+  var summaryEl = document.getElementById('parlaySheetSummary');
+  var weeklyEl = document.getElementById('parlaySheetWeekly');
+  var legs = data.legs || [];
+  if (!legs.length){
+    statusEl.textContent = 'No parlay data yet — submit this week\\'s leg below to get started.';
+    summaryEl.innerHTML = '';
+    weeklyEl.innerHTML = '';
+    return;
+  }
+  statusEl.textContent = '';
+  var stats = (data.stats || []).slice().sort(function(a,b){
+    var ra = a.hit_rate_pct == null ? -1 : a.hit_rate_pct, rb = b.hit_rate_pct == null ? -1 : b.hit_rate_pct;
+    return rb - ra;
+  });
+  updateBestParlayPickerCard(stats);
+  var lbRows = stats.map(function(s){
+    return '<tr><td>' + escHtml(s.manager) + '</td><td>' + s.hits + '-' + s.misses + '</td><td>' + (s.hit_rate_pct == null ? '—' : s.hit_rate_pct + '%') + '</td></tr>';
+  }).join('');
+  summaryEl.innerHTML = '<h3 class="playoff-col-title" style="margin:18px 0 10px">Leg Leaderboard</h3>' +
+    '<table><thead><tr><th>Manager</th><th>Record</th><th>Hit Rate</th></tr></thead><tbody>' + lbRows + '</tbody></table>';
+
+  var byWeek = {};
+  legs.forEach(function(l){
+    var key = l.season + '-' + l.week;
+    byWeek[key] = byWeek[key] || {season: l.season, week: l.week, legs: []};
+    byWeek[key].legs.push(l);
+  });
+  var weeksSorted = Object.keys(byWeek).map(function(k){ return byWeek[k]; })
+    .sort(function(a,b){ return (b.season - a.season) || (b.week - a.week); });
+  weeklyEl.innerHTML = weeksSorted.map(function(w){
+    var results = w.legs.map(function(l){ return l.result; });
+    var outcome = results.length && results.every(function(r){ return r === 'hit'; }) ? 'hit'
+      : (results.some(function(r){ return r === 'miss'; }) ? 'miss' : 'pending');
+    var rows = w.legs.map(function(l){
+      return '<tr><td>' + escHtml(l.manager) + '</td><td>' + escHtml(l.pick) + '</td><td><span class="playoff-badge ' + sbBadgeCls(l.result) + '">' + l.result + '</span></td></tr>';
+    }).join('');
+    return '<div class="record-card" style="text-align:left;margin-bottom:14px">' +
+      '<div class="record-label">Week ' + w.week + ', ' + w.season + ' <span class="playoff-badge ' + sbBadgeCls(outcome) + '">' + outcome + '</span></div>' +
+      '<table><thead><tr><th>Manager</th><th>Pick</th><th>Result</th></tr></thead><tbody>' + rows + '</tbody></table></div>';
+  }).join('');
+}
+function submitParlayLegSheets(){
+  var season = parseInt(document.getElementById('shSeason').value, 10);
+  var week = parseInt(document.getElementById('shWeek').value, 10);
+  var manager = document.getElementById('shManager').value.trim();
+  var pick = document.getElementById('shPick').value.trim();
+  var status = document.getElementById('shSubmitStatus');
+  if (!season || !week || !manager || !pick){ status.textContent = 'Fill in season, week, your name, and your pick.'; return; }
+  status.textContent = 'Submitting…';
+  fetch(window.SHEETS_WEBAPP_URL, {
+    method: 'POST',
+    headers: {'Content-Type': 'text/plain;charset=utf-8'}, // avoids a CORS preflight Apps Script can't handle
+    body: JSON.stringify({action: 'submit_leg', season: season, week: week, manager: manager, pick: pick}),
+  }).then(function(r){ return r.json(); })
+    .then(function(data){
+      if (!data.ok) throw new Error(data.error || 'submit failed');
+      status.textContent = 'Leg submitted for ' + manager + '.';
+      document.getElementById('shPick').value = '';
+      loadParlaySheets();
+    }).catch(function(err){ status.textContent = 'Could not submit: ' + err.message; });
+}
+function loadParlayGradingWeekSheets(){
+  var season = parseInt(document.getElementById('shSeason').value, 10);
+  var week = parseInt(document.getElementById('shWeek').value, 10);
+  var wrap = document.getElementById('parlayGradeRowsSheets');
+  if (!season || !week){ wrap.innerHTML = '<p class="empty">Set season/week above first.</p>'; return; }
+  fetch(sheetsUrl({action: 'all'}))
+    .then(function(r){ return r.json(); })
+    .then(function(data){
+      var legs = (data.legs || []).filter(function(l){ return Number(l.season) === season && Number(l.week) === week; });
+      if (!legs.length){ wrap.innerHTML = '<p class="empty">No legs submitted for that week yet.</p>'; return; }
+      wrap.innerHTML = legs.map(function(l){
+        var opts = ['pending','hit','miss'].map(function(r){ return '<option value="' + r + '"' + (r === l.result ? ' selected' : '') + '>' + r + '</option>'; }).join('');
+        return `<div class="parlay-entry-row">
+          <span>${escHtml(l.manager)}</span>
+          <span>${escHtml(l.pick)}</span>
+          <select id="shgrade-${l.id}">${opts}</select>
+          <button type="button" onclick="gradeParlayLegSheets('${l.id}')">Save</button>
+          </div>`;
+      }).join('');
+    })
+    .catch(function(err){ wrap.innerHTML = '<p class="empty">Could not load that week.</p>'; console.error(err); });
+}
+function gradeParlayLegSheets(legId){
+  var pin = document.getElementById('shPin').value;
+  var result = document.getElementById('shgrade-' + legId).value;
+  if (!pin){ alert('Enter the commissioner PIN first.'); return; }
+  fetch(window.SHEETS_WEBAPP_URL, {
+    method: 'POST',
+    headers: {'Content-Type': 'text/plain;charset=utf-8'},
+    body: JSON.stringify({action: 'grade_leg', id: legId, result: result, pin: pin}),
+  }).then(function(r){ return r.json(); })
+    .then(function(data){
+      if (!data.ok) throw new Error(data.error || 'grade failed');
+      loadParlaySheets();
+    }).catch(function(err){ alert('Could not grade leg: ' + err.message); });
+}
+if (window.SHEETS_WEBAPP_URL) { loadParlaySheets(); }
 """
 
 
@@ -1438,55 +1960,208 @@ def render_front_office(model):
             f"<div id='fo-capital' class='subpanel'>{render_draft_capital(model['draft_capital'])}</div>")
 
 
-def render_superlatives(superlatives):
-    if not superlatives:
-        return ("<h2 class='section-title'>Draft-Position Superlatives</h2>"
-                "<p class='section-note'>Awaiting this league's superlative definitions. Once configured "
-                "(see the SUPERLATIVES list near the top of the script), this tab will track in-season "
-                "awards that determine next year's rookie draft order.</p>")
-    cards = "".join(
-        f"<div class='record-card'><div class='record-label'>{esc(s['name'])}</div>"
-        f"<div class='record-value'>{esc(s.get('value', ''))}</div>"
-        f"{team_cell(s.get('leader', 'TBD'))}"
+def render_superlatives(stat_superlatives, voted_names):
+    stat_cards = "".join(
+        f"<div class='record-card'>"
+        f"<div class='record-label'>{esc(s['name'])}</div>"
+        f"<div class='record-value' id='{s['id']}-value'>{esc(s.get('value', ''))}</div>"
+        f"<div id='{s['id']}-leader'>{team_cell(s.get('leader', 'TBD'), s.get('owner'))}</div>"
         f"<div class='record-context'>{esc(s.get('description', ''))}</div></div>"
-        for s in superlatives
+        for s in stat_superlatives
     )
-    return (f"<h2 class='section-title'>Draft-Position Superlatives</h2>"
-            f"<p class='section-note'>In-season awards that carry into next year's rookie draft order.</p>"
-            f"<div class='record-grid'>{cards}</div>")
+    voted_cards = "".join(
+        f"<div class='record-card'>"
+        f"<div class='record-label'>{esc(name)}</div>"
+        f"<div class='record-value'>&mdash;</div>"
+        f"{team_cell('Vote pending')}"
+        f"<div class='record-context'>Decided by league vote at season's end.</div></div>"
+        for name in voted_names
+    )
+    return (f"<h2 class='section-title'>Superlatives</h2>"
+            f"<p class='section-note'>Tracked automatically throughout the season.</p>"
+            f"<div class='record-grid'>{stat_cards}</div>"
+            f"<h3 class='playoff-col-title' style='margin:24px 0 10px'>End-of-Season (Voted)</h3>"
+            f"<p class='section-note'>Empty until the league votes at season's end.</p>"
+            f"<div class='record-grid'>{voted_cards}</div>")
 
 
-def render_parlay(summary):
-    if not summary:
-        return ("<h2 class='section-title'>Weekly Parlay</h2>"
-                f"<p class='section-note'>No parlay data found yet. Add entries to <code>{esc(PARLAY_FILE)}</code> "
-                "to start tracking &mdash; see the load_parlay_weeks() docstring in the script for the expected format.</p>")
-    decided = summary["parlays_decided"]
-    rate = (summary["parlays_hit"] / decided * 100) if decided else 0
-    header = (f"<h2 class='section-title'>Weekly Parlay</h2>"
-              f"<p class='section-note'>Season parlay record: {summary['parlays_hit']}-{decided - summary['parlays_hit']} "
-              f"({rate:.0f}% of weeks hit all 12 legs)</p>")
-    lb_rows = "".join(
-        f"<tr><td>{esc(r['manager'])}</td><td>{r['hits']}-{r['misses']}</td><td>{r['rate']}%</td></tr>"
-        for r in summary["leaderboard"]
-    )
-    lb_html = (f"<h3 class='playoff-col-title' style='margin:18px 0 10px'>Leg Leaderboard</h3>"
-               f"<table><thead><tr><th>Manager</th><th>Record</th><th>Hit Rate</th></tr></thead><tbody>{lb_rows}</tbody></table>")
-    badge_cls = {"hit": "badge-clinched", "miss": "badge-eliminated", "pending": "badge-hunt"}
-    weeks_html = []
-    for wk in reversed(summary["weekly"]):
-        legs_rows = "".join(
-            f"<tr><td>{esc(l.get('manager', ''))}</td><td>{esc(l.get('pick', ''))}</td>"
-            f"<td><span class='playoff-badge {badge_cls.get(l.get('result'), 'badge-hunt')}'>{esc((l.get('result') or 'pending').title())}</span></td></tr>"
-            for l in wk["legs"]
+def render_parlay(weeks, model):
+    """
+    Renders the Weekly Parlay tab, picking a backend in priority order:
+      1. Google Sheets (SHEETS_WEBAPP_URL set) — live, multi-device, no
+         project quotas to run into. See parlay_apps_script.gs.
+      2. Supabase (SUPABASE_URL + SUPABASE_ANON_KEY set) — live, multi-device,
+         real Postgres. See supabase_parlay_schema.sql.
+      3. Local JSON file + localStorage — single-user fallback when neither
+         of the above is configured.
+    """
+    if SHEETS_WEBAPP_URL:
+        return render_parlay_sheets(model)
+    if SUPABASE_URL and SUPABASE_ANON_KEY:
+        return render_parlay_supabase(model)
+    return render_parlay_local(weeks, model)
+
+
+def render_parlay_sheets(model):
+    managers = sorted({(s.get('owner') or s['name']) for s in model['standings']})
+    manager_options = "".join(f"<option value='{esc(m)}'></option>" for m in managers)
+    return f"""<h2 class="section-title">Weekly Parlay</h2>
+    <p class="section-note">Live via Google Sheets &mdash; every manager can submit their own leg from their own device. Results are graded behind a PIN.</p>
+    <div id="parlaySheetStatus" class="section-note">Loading&hellip;</div>
+    <div id="parlaySheetSummary"></div>
+
+    <h3 class="playoff-col-title" style="margin:24px 0 10px">Submit This Week's Leg</h3>
+    <div class="parlay-entry">
+      <div class="parlay-entry-row parlay-entry-header">
+        <input type="number" id="shSeason" placeholder="Season" value="{model['season']}">
+        <input type="number" id="shWeek" placeholder="Week" value="{model['current_week']}">
+      </div>
+      <div class="parlay-entry-row">
+        <input list="parlayManagers" id="shManager" placeholder="Your name">
+        <input id="shPick" placeholder="Your pick (e.g. Justin Jefferson anytime TD)">
+        <button type="button" onclick="submitParlayLegSheets()">Submit Leg</button>
+      </div>
+      <datalist id="parlayManagers">{manager_options}</datalist>
+      <p id="shSubmitStatus" class="section-note"></p>
+    </div>
+
+    <h3 class="playoff-col-title" style="margin:24px 0 10px">Grade Legs (commissioner)</h3>
+    <p class="section-note">Requires the PIN set in the Apps Script (change it with changePinFromEditor()).</p>
+    <div class="parlay-entry">
+      <div class="parlay-entry-row parlay-entry-header">
+        <input type="password" id="shPin" placeholder="Commissioner PIN">
+        <button type="button" onclick="loadParlayGradingWeekSheets()">Load Week to Grade</button>
+      </div>
+      <div id="parlayGradeRowsSheets"></div>
+    </div>
+
+    <h3 class="playoff-col-title" style="margin:24px 0 10px">Weekly Breakdown</h3>
+    <div id="parlaySheetWeekly"></div>
+
+    <script>
+      window.SHEETS_WEBAPP_URL = {json.dumps(SHEETS_WEBAPP_URL)};
+    </script>"""
+
+
+def render_parlay_supabase(model):
+    managers = sorted({(s.get('owner') or s['name']) for s in model['standings']})
+    manager_options = "".join(f"<option value='{esc(m)}'></option>" for m in managers)
+    return f"""<h2 class="section-title">Weekly Parlay</h2>
+    <p class="section-note">Live &mdash; every manager can submit their own leg from their own device. Results are graded behind a PIN.</p>
+    <div id="parlaySbStatus" class="section-note">Loading&hellip;</div>
+    <div id="parlaySbSummary"></div>
+
+    <h3 class="playoff-col-title" style="margin:24px 0 10px">Submit This Week's Leg</h3>
+    <div class="parlay-entry">
+      <div class="parlay-entry-row parlay-entry-header">
+        <input type="number" id="sbSeason" placeholder="Season" value="{model['season']}">
+        <input type="number" id="sbWeek" placeholder="Week" value="{model['current_week']}">
+      </div>
+      <div class="parlay-entry-row">
+        <input list="parlayManagers" id="sbManager" placeholder="Your name">
+        <input id="sbPick" placeholder="Your pick (e.g. Justin Jefferson anytime TD)">
+        <button type="button" onclick="submitParlayLeg()">Submit Leg</button>
+      </div>
+      <datalist id="parlayManagers">{manager_options}</datalist>
+      <p id="sbSubmitStatus" class="section-note"></p>
+    </div>
+
+    <h3 class="playoff-col-title" style="margin:24px 0 10px">Grade Legs (commissioner)</h3>
+    <p class="section-note">Requires the shared PIN set in the database (app_config.commish_pin).</p>
+    <div class="parlay-entry">
+      <div class="parlay-entry-row parlay-entry-header">
+        <input type="password" id="sbPin" placeholder="Commissioner PIN">
+        <button type="button" onclick="loadParlayGradingWeek()">Load Week to Grade</button>
+      </div>
+      <div id="parlayGradeRows"></div>
+    </div>
+
+    <h3 class="playoff-col-title" style="margin:24px 0 10px">Weekly Breakdown</h3>
+    <div id="parlaySbWeekly"></div>
+
+    <script>
+      window.SUPABASE_URL = {json.dumps(SUPABASE_URL)};
+      window.SUPABASE_ANON_KEY = {json.dumps(SUPABASE_ANON_KEY)};
+    </script>"""
+
+
+def render_parlay_local(weeks, model):
+    """
+    Renders the Weekly Parlay tab, including an in-browser entry form.
+
+    That form is a single-user workflow, not a shared multi-manager one:
+    it saves drafts to THIS browser's localStorage as you fill them in,
+    and a "Download updated parlay.json" button exports the merged result
+    (file data + your drafts) for you to commit — at which point it becomes
+    the real source of truth and shows up for everyone on the next
+    regenerate. It intentionally doesn't try to sync across devices or
+    submit anywhere on its own, since a static HTML page has nowhere to
+    send that data to. Fine for a commissioner entering all 12 legs
+    themselves; not a fit if you want each manager submitting their own.
+    """
+    summary = compute_parlay_summary(weeks)
+    header = "<h2 class='section-title'>Weekly Parlay</h2>"
+    if summary:
+        decided = summary["parlays_decided"]
+        rate = (summary["parlays_hit"] / decided * 100) if decided else 0
+        header += (f"<p class='section-note'>Season parlay record: {summary['parlays_hit']}-{decided - summary['parlays_hit']} "
+                   f"({rate:.0f}% of weeks hit all 12 legs)</p>")
+        lb_rows = "".join(
+            f"<tr><td>{esc(r['manager'])}</td><td>{r['hits']}-{r['misses']}</td><td>{r['rate']}%</td></tr>"
+            for r in summary["leaderboard"]
         )
-        weeks_html.append(
-            f"<div class='record-card' style='text-align:left;margin-bottom:14px'>"
-            f"<div class='record-label'>Week {wk['week']}, {wk['season']} "
-            f"<span class='playoff-badge {badge_cls.get(wk['outcome'], 'badge-hunt')}'>{wk['outcome'].title()}</span></div>"
-            f"<table><thead><tr><th>Manager</th><th>Pick</th><th>Result</th></tr></thead><tbody>{legs_rows}</tbody></table></div>"
-        )
-    return header + lb_html + "<h3 class='playoff-col-title' style='margin:18px 0 10px'>Weekly Breakdown</h3>" + "".join(weeks_html)
+        lb_html = (f"<h3 class='playoff-col-title' style='margin:18px 0 10px'>Leg Leaderboard</h3>"
+                   f"<table><thead><tr><th>Manager</th><th>Record</th><th>Hit Rate</th></tr></thead><tbody>{lb_rows}</tbody></table>")
+        badge_cls = {"hit": "badge-clinched", "miss": "badge-eliminated", "pending": "badge-hunt"}
+        weeks_html = []
+        for wk in reversed(summary["weekly"]):
+            legs_rows = "".join(
+                f"<tr><td>{esc(l.get('manager', ''))}</td><td>{esc(l.get('pick', ''))}</td>"
+                f"<td><span class='playoff-badge {badge_cls.get(l.get('result'), 'badge-hunt')}'>{esc((l.get('result') or 'pending').title())}</span></td></tr>"
+                for l in wk["legs"]
+            )
+            weeks_html.append(
+                f"<div class='record-card' style='text-align:left;margin-bottom:14px'>"
+                f"<div class='record-label'>Week {wk['week']}, {wk['season']} "
+                f"<span class='playoff-badge {badge_cls.get(wk['outcome'], 'badge-hunt')}'>{wk['outcome'].title()}</span></div>"
+                f"<table><thead><tr><th>Manager</th><th>Pick</th><th>Result</th></tr></thead><tbody>{legs_rows}</tbody></table></div>"
+            )
+        body_html = lb_html + "<h3 class='playoff-col-title' style='margin:18px 0 10px'>Weekly Breakdown</h3>" + "".join(weeks_html)
+    else:
+        header += (f"<p class='section-note'>No parlay data yet — use the entry form below to add this week's legs, "
+                   f"or hand-edit <code>{esc(PARLAY_FILE)}</code> directly.</p>")
+        body_html = ""
+
+    managers = sorted({(s.get('owner') or s['name']) for s in model['standings']})
+    manager_options = "".join(f"<option value='{esc(m)}'></option>" for m in managers)
+    parlay_json = json.dumps(weeks)
+
+    entry_form = f"""
+    <h3 class="playoff-col-title" style="margin:24px 0 10px">Add / Edit a Week (commissioner entry)</h3>
+    <p class="section-note">Fills a week's legs and saves a draft in this browser as you go. Nothing here syncs to
+    other managers or updates the live page on its own &mdash; use "Download updated {esc(PARLAY_FILE)}" when a week
+    is final, then commit that file so the next regenerate picks it up for everyone.</p>
+    <div class="parlay-entry">
+      <div class="parlay-entry-row parlay-entry-header">
+        <input type="number" id="pxSeason" placeholder="Season" value="{model['season']}">
+        <input type="number" id="pxWeek" placeholder="Week" value="{model['current_week']}">
+        <button type="button" onclick="loadParlayWeek()">Load Week</button>
+      </div>
+      <datalist id="parlayManagers">{manager_options}</datalist>
+      <div id="parlayLegRows"></div>
+      <div class="parlay-entry-actions">
+        <button type="button" onclick="addParlayLegRow()">+ Add Leg</button>
+        <button type="button" onclick="saveParlayWeek()">Save Draft (this browser)</button>
+        <button type="button" onclick="downloadParlayJSON()">Download Updated {esc(PARLAY_FILE)}</button>
+      </div>
+      <p id="parlayStatus" class="section-note"></p>
+    </div>
+    <script>
+      window.PARLAY_DATA = {parlay_json};
+      window.PARLAY_FILE_NAME = {json.dumps(PARLAY_FILE)};
+    </script>"""
+
+    return header + body_html + entry_form
 
 
 def _streak_span_label(entry):
@@ -1603,8 +2278,8 @@ def render(model):
         ("frontoffice", "Front Office", render_front_office(model)),
         ("transactions", "Transactions", render_transactions_section(model['activity'], model['trade_log'])),
         ("draft", "Draft Board", render_draft(model['draft'])),
-        ("superlatives", "Superlatives", render_superlatives(SUPERLATIVES)),
-        ("parlay", "Weekly Parlay", render_parlay(compute_parlay_summary(load_parlay_weeks()))),
+        ("superlatives", "Superlatives", render_superlatives(model['stat_superlatives'], VOTED_SUPERLATIVES)),
+        ("parlay", "Weekly Parlay", render_parlay(load_parlay_weeks(), model)),
         ("history", "History", render_history(model['history'], model['season'])),
     ]
     tabs = "".join(f"<button class='tab{' active' if i==0 else ''}' onclick=\"showTab('{pid}',this)\">{label}</button>" for i, (pid, label, _) in enumerate(panels))
