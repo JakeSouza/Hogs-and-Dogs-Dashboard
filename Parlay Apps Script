@@ -40,6 +40,17 @@
  *   - The sheet's actual owner never has to share Edit access with anyone;
  *     the deployed Web App writes on their behalf without exposing their
  *     account.
+ *
+ * BATCH ENTRY (submit_week):
+ *   The dashboard's "Submit Week" button uses this instead of submit_leg —
+ *   it writes an entire week's worth of legs (up to 12) in one call, and
+ *   unlike submit_leg it DOES write "result" directly, no PIN. This is
+ *   intentionally simpler than the submit/grade split above: whoever has
+ *   the page URL can both enter legs and fill in hit/miss once results are
+ *   known, by loading a week and re-submitting it. submit_leg/grade_leg
+ *   are left in place below in case you want the more locked-down flow
+ *   instead (grading gated behind the PIN) — the dashboard just doesn't
+ *   call them anymore by default.
  */
 
 var SHEET_NAME = 'Legs';
@@ -160,10 +171,63 @@ function doPost(e) {
   try {
     if (payload.action === 'submit_leg') return jsonOut_(submitLeg_(payload));
     if (payload.action === 'grade_leg') return jsonOut_(gradeLeg_(payload));
+    if (payload.action === 'submit_week') return jsonOut_(submitWeek_(payload));
     return jsonOut_({ ok: false, error: 'unknown action' });
   } catch (err) {
     return jsonOut_({ ok: false, error: String(err) });
   }
+}
+
+// Batch upsert an entire week's legs in one call — used by the dashboard's
+// "Submit Week" button, both for the first pass (entering all 12 legs) and
+// later passes (adding hit/miss once results are known). Unlike
+// submit_leg (which only ever touches the "pick"), this also writes
+// "result", since re-submitting a week with results filled in is exactly
+// how grading works in this flow — no separate PIN-gated action needed.
+function submitWeek_(payload) {
+  var season = Number(payload.season);
+  var week = Number(payload.week);
+  var legs = payload.legs || [];
+  if (!season || !week) throw new Error('season and week are required');
+  if (!legs.length) throw new Error('at least one leg is required');
+
+  var sheet = getSheet_();
+  var values = sheet.getDataRange().getValues();
+  var now = new Date();
+  var results = [];
+
+  legs.forEach(function (leg) {
+    var manager = String(leg.manager || '').trim();
+    var pick = String(leg.pick || '').trim();
+    var result = String(leg.result || 'pending').trim();
+    if (['pending', 'hit', 'miss'].indexOf(result) === -1) result = 'pending';
+    if (!manager || !pick) return; // skip incomplete rows silently — partial weeks are fine
+
+    var matched = false;
+    for (var i = 1; i < values.length; i++) {
+      var row = values[i];
+      if (Number(row[1]) === season && Number(row[2]) === week &&
+          String(row[3]).trim().toLowerCase() === manager.toLowerCase()) {
+        sheet.getRange(i + 1, 5).setValue(pick);    // E: pick
+        sheet.getRange(i + 1, 6).setValue(result);  // F: result
+        sheet.getRange(i + 1, 8).setValue(now);     // H: updated_at
+        values[i][4] = pick;
+        values[i][5] = result; // keep in-memory snapshot in sync for later iterations in this same call
+        results.push({ manager: manager, action: 'updated' });
+        matched = true;
+        break;
+      }
+    }
+    if (!matched) {
+      var id = Utilities.getUuid();
+      var newRow = [id, season, week, manager, pick, result, now, now];
+      sheet.appendRow(newRow);
+      values.push(newRow);
+      results.push({ manager: manager, action: 'inserted' });
+    }
+  });
+
+  return { ok: true, results: results };
 }
 
 // Upserts by (season, week, manager) — resubmitting updates your own pick,
