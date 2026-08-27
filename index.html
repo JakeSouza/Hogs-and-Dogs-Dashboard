@@ -130,10 +130,10 @@ td{padding:9px 10px;border-bottom:1px solid #1f2740}
     <h1 class="hero-title">Hogs and Dogs</h1>
     <div class="hero-meta">
       <span class="hero-chip hero-chip-est">Est. 2026</span>
-      <span class="hero-chip">Week 3</span>
+      <span class="hero-chip">Preseason &middot; Starts 2026-08-06</span>
       <span class="hero-chip">12 Teams</span>
       <span class="hero-chip">&#127942; lilstank69</span>
-      <span class="hero-chip hero-chip-muted">Updated Aug 27, 2026 12:50 PM</span>
+      <span class="hero-chip hero-chip-muted">Updated Aug 27, 2026 06:09 PM</span>
     </div>
   </div>
 </header>
@@ -193,7 +193,7 @@ td{padding:9px 10px;border-bottom:1px solid #1f2740}
     <div class="parlay-entry">
       <div class="parlay-entry-row parlay-entry-header">
         <input type="number" id="pxSeason" placeholder="Season" value="2026">
-        <input type="number" id="pxWeek" placeholder="Week" value="3">
+        <input type="number" id="pxWeek" placeholder="Week" value="1">
         <button type="button" onclick="loadParlayWeek()">Load Week</button>
       </div>
       <div id="parlayLegRows"></div>
@@ -235,9 +235,9 @@ function populatePickSelect(pickEl, manager, currentPick){
 }
 function updateBestParlayPickerCard(stats){
   // Fills the Superlatives tab's "Best Parlay Picker" card once live parlay
-  // data loads (Sheets/Supabase backends only — the local-file backend's
-  // version is already baked in server-side). No-op if that card isn't on
-  // the page, or there's no data yet.
+  // data loads (Sheets backend only — the local-file backend's version is
+  // already baked in server-side). No-op if that card isn't on the page,
+  // or there's no data yet.
   var valueEl = document.getElementById('splat-parlay-value');
   var leaderEl = document.getElementById('splat-parlay-leader');
   if (!valueEl || !leaderEl || !stats || !stats.length) return;
@@ -300,9 +300,6 @@ function addParlayLegRow(manager, pick, result){
 function onParlayRowManagerChange(sel){
   var row = sel.parentNode;
   populatePickSelect(row.querySelector('.px-pick'), sel.value, '');
-}
-function onSubmitManagerChange(prefix){
-  populatePickSelect(document.getElementById(prefix + 'Pick'), document.getElementById(prefix + 'Manager').value, '');
 }
 function loadParlayDraft(){
   try { return JSON.parse(localStorage.getItem('parlayDraftWeeks') || '[]'); } catch(e){ return []; }
@@ -368,120 +365,9 @@ function downloadParlayJSON(){
 }
 if (document.getElementById('parlayLegRows')) { loadParlayWeek(); }
 
-/* ---------- Weekly Parlay (Supabase-backed live version) ---------- */
-function sbHeaders(extra){
-  var h = {'apikey': window.SUPABASE_ANON_KEY, 'Authorization': 'Bearer ' + window.SUPABASE_ANON_KEY, 'Content-Type': 'application/json'};
-  if (extra) for (var k in extra) h[k] = extra[k];
-  return h;
-}
-function sbRest(path){
-  var base = window.SUPABASE_URL;
-  if (base.charAt(base.length - 1) === '/') { base = base.slice(0, -1); }
-  return base + '/rest/v1/' + path;
-}
-function sbBadgeCls(result){
+function parlayBadgeCls(result){
   return result === 'hit' ? 'badge-clinched' : (result === 'miss' ? 'badge-eliminated' : 'badge-hunt');
 }
-function loadParlaySupabase(){
-  var statusEl = document.getElementById('parlaySbStatus');
-  if (!statusEl) return; // not on this tab's markup — Supabase not configured
-  Promise.all([
-    fetch(sbRest('parlay_weeks?select=id,season,week,parlay_legs(id,manager,pick,result)&order=season.asc,week.asc'), {headers: sbHeaders()}).then(function(r){ return r.json(); }),
-    fetch(sbRest('parlay_manager_stats?select=*'), {headers: sbHeaders()}).then(function(r){ return r.json(); }),
-  ]).then(function(results){
-    renderParlaySupabase(results[0] || [], results[1] || []);
-  }).catch(function(err){
-    statusEl.textContent = 'Could not load parlay data — check SUPABASE_URL/SUPABASE_ANON_KEY and that the schema has been run.';
-    console.error(err);
-  });
-}
-function renderParlaySupabase(weeks, stats){
-  var statusEl = document.getElementById('parlaySbStatus');
-  var summaryEl = document.getElementById('parlaySbSummary');
-  var weeklyEl = document.getElementById('parlaySbWeekly');
-  if (!weeks.length){
-    statusEl.textContent = 'No parlay data yet — submit this week\'s leg below to get started.';
-    summaryEl.innerHTML = '';
-    weeklyEl.innerHTML = '';
-    return;
-  }
-  statusEl.textContent = '';
-  updateBestParlayPickerCard(stats);
-  var lbRows = stats.map(function(s){
-    return '<tr><td>' + escHtml(s.manager) + '</td><td>' + s.hits + '-' + s.misses + '</td><td>' + (s.hit_rate_pct == null ? '—' : s.hit_rate_pct + '%') + '</td></tr>';
-  }).join('');
-  summaryEl.innerHTML = '<h3 class="playoff-col-title" style="margin:18px 0 10px">Leg Leaderboard</h3>' +
-    '<table><thead><tr><th>Manager</th><th>Record</th><th>Hit Rate</th></tr></thead><tbody>' + lbRows + '</tbody></table>';
-
-  var weeksSorted = weeks.slice().sort(function(a,b){ return (b.season - a.season) || (b.week - a.week); });
-  weeklyEl.innerHTML = weeksSorted.map(function(w){
-    var legs = w.parlay_legs || [];
-    var results = legs.map(function(l){ return l.result; });
-    var outcome = results.length && results.every(function(r){ return r === 'hit'; }) ? 'hit'
-      : (results.some(function(r){ return r === 'miss'; }) ? 'miss' : 'pending');
-    var rows = legs.map(function(l){
-      return '<tr><td>' + escHtml(l.manager) + '</td><td>' + escHtml(l.pick) + '</td><td><span class="playoff-badge ' + sbBadgeCls(l.result) + '">' + l.result + '</span></td></tr>';
-    }).join('');
-    return '<div class="record-card" style="text-align:left;margin-bottom:14px">' +
-      '<div class="record-label">Week ' + w.week + ', ' + w.season + ' <span class="playoff-badge ' + sbBadgeCls(outcome) + '">' + outcome + '</span></div>' +
-      '<table><thead><tr><th>Manager</th><th>Pick</th><th>Result</th></tr></thead><tbody>' + rows + '</tbody></table></div>';
-  }).join('');
-}
-function submitParlayLeg(){
-  var season = parseInt(document.getElementById('sbSeason').value, 10);
-  var week = parseInt(document.getElementById('sbWeek').value, 10);
-  var manager = document.getElementById('sbManager').value.trim();
-  var pick = document.getElementById('sbPick').value.trim();
-  var status = document.getElementById('sbSubmitStatus');
-  if (!season || !week || !manager || !pick){ status.textContent = 'Fill in season, week, your name, and your pick.'; return; }
-  status.textContent = 'Submitting…';
-  fetch(sbRest('rpc/submit_leg'), {
-    method: 'POST', headers: sbHeaders(),
-    body: JSON.stringify({p_season: season, p_week: week, p_manager: manager, p_pick: pick}),
-  }).then(function(r){
-    if (!r.ok) return r.json().then(function(e){ throw new Error(e.message || 'submit failed'); });
-    status.textContent = 'Leg submitted for ' + manager + '.';
-    document.getElementById('sbPick').value = '';
-    loadParlaySupabase();
-  }).catch(function(err){
-    status.textContent = 'Could not submit: ' + err.message;
-  });
-}
-function loadParlayGradingWeek(){
-  var season = parseInt(document.getElementById('sbSeason').value, 10);
-  var week = parseInt(document.getElementById('sbWeek').value, 10);
-  var wrap = document.getElementById('parlayGradeRows');
-  if (!season || !week){ wrap.innerHTML = '<p class="empty">Set season/week above first.</p>'; return; }
-  fetch(sbRest('parlay_weeks?select=id,season,week,parlay_legs(id,manager,pick,result)&season=eq.' + season + '&week=eq.' + week), {headers: sbHeaders()})
-    .then(function(r){ return r.json(); })
-    .then(function(rows){
-      var wk = rows[0];
-      if (!wk || !wk.parlay_legs || !wk.parlay_legs.length){ wrap.innerHTML = '<p class="empty">No legs submitted for that week yet.</p>'; return; }
-      wrap.innerHTML = wk.parlay_legs.map(function(l){
-        var opts = ['pending','hit','miss'].map(function(r){ return '<option value="' + r + '"' + (r === l.result ? ' selected' : '') + '>' + r + '</option>'; }).join('');
-        return `<div class="parlay-entry-row">
-          <span>${escHtml(l.manager)}</span>
-          <span>${escHtml(l.pick)}</span>
-          <select id="grade-${l.id}">${opts}</select>
-          <button type="button" onclick="gradeParlayLeg(${l.id})">Save</button>
-          </div>`;
-      }).join('');
-    })
-    .catch(function(err){ wrap.innerHTML = '<p class="empty">Could not load that week.</p>'; console.error(err); });
-}
-function gradeParlayLeg(legId){
-  var pin = document.getElementById('sbPin').value;
-  var result = document.getElementById('grade-' + legId).value;
-  if (!pin){ alert('Enter the commissioner PIN first.'); return; }
-  fetch(sbRest('rpc/grade_leg'), {
-    method: 'POST', headers: sbHeaders(),
-    body: JSON.stringify({p_leg_id: legId, p_result: result, p_pin: pin}),
-  }).then(function(r){
-    if (!r.ok) return r.json().then(function(e){ throw new Error(e.message || 'grade failed'); });
-    loadParlaySupabase();
-  }).catch(function(err){ alert('Could not grade leg: ' + err.message); });
-}
-if (window.SUPABASE_URL && window.SUPABASE_ANON_KEY) { loadParlaySupabase(); }
 
 /* ---------- Weekly Parlay (Google Sheets / Apps Script-backed live version) ---------- */
 function sheetsUrl(params){
@@ -512,7 +398,7 @@ function renderParlaySheets(data){
   var weeklyEl = document.getElementById('parlaySheetWeekly');
   var legs = data.legs || [];
   if (!legs.length){
-    statusEl.textContent = 'No parlay data yet — submit this week\'s leg below to get started.';
+    statusEl.textContent = 'No parlay data yet — fill in a week below and Submit Week to get started.';
     summaryEl.innerHTML = '';
     weeklyEl.innerHTML = '';
     return;
@@ -542,68 +428,87 @@ function renderParlaySheets(data){
     var outcome = results.length && results.every(function(r){ return r === 'hit'; }) ? 'hit'
       : (results.some(function(r){ return r === 'miss'; }) ? 'miss' : 'pending');
     var rows = w.legs.map(function(l){
-      return '<tr><td>' + escHtml(l.manager) + '</td><td>' + escHtml(l.pick) + '</td><td><span class="playoff-badge ' + sbBadgeCls(l.result) + '">' + l.result + '</span></td></tr>';
+      return '<tr><td>' + escHtml(l.manager) + '</td><td>' + escHtml(l.pick) + '</td><td><span class="playoff-badge ' + parlayBadgeCls(l.result) + '">' + l.result + '</span></td></tr>';
     }).join('');
     return '<div class="record-card" style="text-align:left;margin-bottom:14px">' +
-      '<div class="record-label">Week ' + w.week + ', ' + w.season + ' <span class="playoff-badge ' + sbBadgeCls(outcome) + '">' + outcome + '</span></div>' +
+      '<div class="record-label">Week ' + w.week + ', ' + w.season + ' <span class="playoff-badge ' + parlayBadgeCls(outcome) + '">' + outcome + '</span></div>' +
       '<table><thead><tr><th>Manager</th><th>Pick</th><th>Result</th></tr></thead><tbody>' + rows + '</tbody></table></div>';
   }).join('');
 }
-function submitParlayLegSheets(){
+function loadParlayWeekSheets(){
   var season = parseInt(document.getElementById('shSeason').value, 10);
   var week = parseInt(document.getElementById('shWeek').value, 10);
-  var manager = document.getElementById('shManager').value.trim();
-  var pick = document.getElementById('shPick').value.trim();
-  var status = document.getElementById('shSubmitStatus');
-  if (!season || !week || !manager || !pick){ status.textContent = 'Fill in season, week, your name, and your pick.'; return; }
+  var wrap = document.getElementById('shLegRows');
+  var status = document.getElementById('shFormStatus');
+  if (!wrap || !status) return;
+  if (!season || !week){ status.textContent = 'Enter a season and week first.'; return; }
+  status.textContent = 'Loading…';
+  fetch(sheetsUrl({action: 'all'}))
+    .then(function(r){ return r.json(); })
+    .then(function(data){
+      if (!data.ok) throw new Error(data.error || 'load failed');
+      var legs = (data.legs || []).filter(function(l){ return Number(l.season) === season && Number(l.week) === week; });
+      wrap.innerHTML = '';
+      var count = Math.max(legs.length, 12);
+      for (var i = 0; i < count; i++){
+        var l = legs[i] || {};
+        addSheetsLegRow(l.manager, l.pick, l.result);
+      }
+      status.textContent = legs.length
+        ? ('Loaded ' + legs.length + ' existing leg' + (legs.length === 1 ? '' : 's') + ' — edit and Submit Week to update.')
+        : 'New week — fill in legs, then Submit Week.';
+    })
+    .catch(function(err){ status.textContent = 'Could not load that week.'; console.error(err); });
+}
+function addSheetsLegRow(manager, pick, result){
+  var wrap = document.getElementById('shLegRows');
+  if (!wrap) return;
+  var row = document.createElement('div');
+  row.className = 'parlay-entry-row';
+  var managers = Object.keys(window.MANAGER_ROSTERS || {}).sort();
+  var mgrOpts = '<option value="">Select manager…</option>' + managers.map(function(m){
+    return '<option value="' + escHtml(m) + '"' + (m === manager ? ' selected' : '') + '>' + escHtml(m) + '</option>';
+  }).join('');
+  var resultOpts = ['pending','hit','miss'].map(function(r){
+    return '<option value="' + r + '"' + (r === (result || 'pending') ? ' selected' : '') + '>' + r + '</option>';
+  }).join('');
+  row.innerHTML =
+    `<select class="sh-manager" onchange="onSheetsRowManagerChange(this)">${mgrOpts}</select>` +
+    `<select class="sh-pick"></select>` +
+    `<select class="sh-result">${resultOpts}</select>` +
+    `<button type="button" onclick="this.parentNode.remove()">&times;</button>`;
+  wrap.appendChild(row);
+  populatePickSelect(row.querySelector('.sh-pick'), manager || '', pick || '');
+}
+function onSheetsRowManagerChange(sel){
+  populatePickSelect(sel.parentNode.querySelector('.sh-pick'), sel.value, '');
+}
+function submitParlayWeekSheets(){
+  var season = parseInt(document.getElementById('shSeason').value, 10);
+  var week = parseInt(document.getElementById('shWeek').value, 10);
+  var status = document.getElementById('shFormStatus');
+  if (!season || !week){ status.textContent = 'Enter a season and week first.'; return; }
+  var rows = document.querySelectorAll('#shLegRows .parlay-entry-row');
+  var legs = [];
+  rows.forEach(function(row){
+    var manager = row.querySelector('.sh-manager').value.trim();
+    var pick = row.querySelector('.sh-pick').value.trim();
+    var result = row.querySelector('.sh-result').value;
+    if (manager && pick) legs.push({manager: manager, pick: pick, result: result});
+  });
+  if (!legs.length){ status.textContent = 'Fill in at least one leg (manager + pick) before submitting.'; return; }
   status.textContent = 'Submitting…';
   fetch(window.SHEETS_WEBAPP_URL, {
     method: 'POST',
     headers: {'Content-Type': 'text/plain;charset=utf-8'}, // avoids a CORS preflight Apps Script can't handle
-    body: JSON.stringify({action: 'submit_leg', season: season, week: week, manager: manager, pick: pick}),
+    body: JSON.stringify({action: 'submit_week', season: season, week: week, legs: legs}),
   }).then(function(r){ return r.json(); })
     .then(function(data){
       if (!data.ok) throw new Error(data.error || 'submit failed');
-      status.textContent = 'Leg submitted for ' + manager + '.';
-      document.getElementById('shPick').value = '';
-      loadParlaySheets();
-    }).catch(function(err){ status.textContent = 'Could not submit: ' + err.message; });
-}
-function loadParlayGradingWeekSheets(){
-  var season = parseInt(document.getElementById('shSeason').value, 10);
-  var week = parseInt(document.getElementById('shWeek').value, 10);
-  var wrap = document.getElementById('parlayGradeRowsSheets');
-  if (!season || !week){ wrap.innerHTML = '<p class="empty">Set season/week above first.</p>'; return; }
-  fetch(sheetsUrl({action: 'all'}))
-    .then(function(r){ return r.json(); })
-    .then(function(data){
-      var legs = (data.legs || []).filter(function(l){ return Number(l.season) === season && Number(l.week) === week; });
-      if (!legs.length){ wrap.innerHTML = '<p class="empty">No legs submitted for that week yet.</p>'; return; }
-      wrap.innerHTML = legs.map(function(l){
-        var opts = ['pending','hit','miss'].map(function(r){ return '<option value="' + r + '"' + (r === l.result ? ' selected' : '') + '>' + r + '</option>'; }).join('');
-        return `<div class="parlay-entry-row">
-          <span>${escHtml(l.manager)}</span>
-          <span>${escHtml(l.pick)}</span>
-          <select id="shgrade-${l.id}">${opts}</select>
-          <button type="button" onclick="gradeParlayLegSheets('${l.id}')">Save</button>
-          </div>`;
-      }).join('');
+      status.textContent = 'Submitted ' + legs.length + ' leg' + (legs.length === 1 ? '' : 's') + ' for Week ' + week + ', ' + season + '.';
+      loadParlaySheets(); // refresh the leaderboard/weekly breakdown below
     })
-    .catch(function(err){ wrap.innerHTML = '<p class="empty">Could not load that week.</p>'; console.error(err); });
+    .catch(function(err){ status.textContent = 'Could not submit: ' + err.message; });
 }
-function gradeParlayLegSheets(legId){
-  var pin = document.getElementById('shPin').value;
-  var result = document.getElementById('shgrade-' + legId).value;
-  if (!pin){ alert('Enter the commissioner PIN first.'); return; }
-  fetch(window.SHEETS_WEBAPP_URL, {
-    method: 'POST',
-    headers: {'Content-Type': 'text/plain;charset=utf-8'},
-    body: JSON.stringify({action: 'grade_leg', id: legId, result: result, pin: pin}),
-  }).then(function(r){ return r.json(); })
-    .then(function(data){
-      if (!data.ok) throw new Error(data.error || 'grade failed');
-      loadParlaySheets();
-    }).catch(function(err){ alert('Could not grade leg: ' + err.message); });
-}
-if (window.SHEETS_WEBAPP_URL) { loadParlaySheets(); }
+if (window.SHEETS_WEBAPP_URL) { loadParlaySheets(); loadParlayWeekSheets(); }
 </script></body></html>
