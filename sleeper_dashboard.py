@@ -1411,17 +1411,44 @@ td{padding:9px 10px;border-bottom:1px solid #1f2740}
 .parlay-leg-pick{font-weight:600;font-size:.9rem}
 .pq-pos{color:#8a92a8;font-weight:500;font-size:.76rem}
 
-/* ---------- Weekly Parlay: picks table + team stats table ---------- */
+/* ---------- Weekly Parlay: week status band ---------- */
+.parlay-week-band{display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:12px;background:linear-gradient(135deg,#141b30 0%,#0f1424 100%);border:1px solid #2a3348;border-radius:12px;padding:16px 22px;margin-bottom:18px;position:relative;overflow:hidden}
+.parlay-week-band::before{content:'';position:absolute;inset:-50%;background:radial-gradient(circle at 20% 30%,rgba(34,197,94,.14),transparent 45%),radial-gradient(circle at 80% 70%,rgba(59,130,246,.14),transparent 45%);pointer-events:none}
+.pq-week-band-title{position:relative;z-index:1;font-family:Georgia,'Times New Roman',serif;font-size:1.2rem;font-weight:700}
+.pq-week-band-stats{position:relative;z-index:1;display:flex;gap:18px;flex-wrap:wrap}
+.pq-week-band-stat{text-align:center}
+.pq-week-band-stat .pwn{font-size:1.1rem;font-weight:800;font-family:Georgia,'Times New Roman',serif}
+.pq-week-band-stat .pwl{font-size:.65rem;color:#8a92a8;text-transform:uppercase;letter-spacing:.5px}
+
+/* ---------- Weekly Parlay: picks table + team stats ---------- */
+.parlay-card{background:#161d30;border:1px solid #2a3348;border-radius:12px;padding:20px;margin-bottom:8px}
 .parlay-week-selector{display:flex;gap:14px;align-items:center;margin-bottom:16px;flex-wrap:wrap}
 .parlay-week-selector label{display:flex;align-items:center;gap:6px;font-size:.82rem;color:#8a92a8}
 .parlay-week-selector input{background:#0f1424;border:1px solid #2a3348;color:#e6e9f0;padding:8px 11px;border-radius:7px;width:90px;font-size:.85rem}
 .parlay-week-selector input:focus{outline:none;border-color:#3b82f6}
 .parlay-table-wrap{overflow-x:auto;margin-bottom:6px}
 .parlay-table{width:100%;border-collapse:collapse;font-size:.88rem}
-.parlay-table th{text-align:left;color:#8a92a8;padding:8px 10px;border-bottom:1px solid #2a3348;font-weight:600}
-.parlay-table td{padding:6px 8px;border-bottom:1px solid #1a2138;vertical-align:middle}
+.parlay-table th{text-align:left;color:#8a92a8;padding:8px 10px;border-bottom:1px solid #2a3348;font-weight:600;font-size:.72rem;text-transform:uppercase;letter-spacing:.5px}
+.parlay-table td{padding:7px 8px;border-bottom:1px solid #1a2138;vertical-align:middle;border-left:3px solid transparent;transition:background-color .15s ease}
+.parlay-table td:first-child{border-left:3px solid transparent}
+.parlay-table tr.pq-row-hit td:first-child{border-left-color:#4ade80;background:rgba(74,222,128,.05)}
+.parlay-table tr.pq-row-miss td:first-child{border-left-color:#f87171;background:rgba(248,113,113,.05)}
+.parlay-table tr.pq-row-hit td,.parlay-table tr.pq-row-miss td{background:inherit}
 .parlay-table td select{width:100%;min-width:120px;background:#0f1424;border:1px solid #2a3348;color:#e6e9f0;padding:7px 9px;border-radius:7px;font-size:.85rem}
 .parlay-table td select:focus{outline:none;border-color:#3b82f6}
+.parlay-table td select.pq-row-result option[value="hit"]{color:#4ade80}
+.parlay-table td select.pq-row-result option[value="miss"]{color:#f87171}
+
+/* Team Stats as cards instead of a plain table */
+.pq-stat-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:14px}
+.pq-stat-card{background:#161d30;border:1px solid #2a3348;border-radius:12px;padding:16px 18px;position:relative;overflow:hidden}
+.pq-stat-card.pq-stat-hit-streak{border-color:rgba(74,222,128,.4)}
+.pq-stat-card.pq-stat-miss-streak{border-color:rgba(248,113,113,.4)}
+.pq-stat-name{font-family:Georgia,'Times New Roman',serif;font-weight:700;font-size:1rem;margin-bottom:10px}
+.pq-stat-row{display:flex;align-items:center;justify-content:space-between;margin-bottom:6px}
+.pq-stat-label{font-size:.68rem;color:#8a92a8;text-transform:uppercase;letter-spacing:.5px}
+.pq-stat-record{font-size:1.15rem;font-weight:800;font-family:Georgia,'Times New Roman',serif}
+.pq-stat-fav{font-size:.82rem;color:#cfd5e6;margin-top:6px;padding-top:10px;border-top:1px solid #1a2138}
 
 @media (max-width:640px){
   .h2h-picker{flex-direction:column;align-items:stretch}
@@ -1429,6 +1456,7 @@ td{padding:9px 10px;border-bottom:1px solid #1f2740}
   .parlay-builder-row{grid-template-columns:22px 1fr;grid-template-areas:"num manager" ". pick" ". result" ". remove";row-gap:6px}
   .parlay-builder-num{grid-area:num}
   .parlay-summary-hero{justify-content:center;text-align:center}
+  .parlay-week-band{flex-direction:column;align-items:flex-start}
 }
 """
 
@@ -1643,6 +1671,11 @@ function pqTeamOptionsHtml(selected){
     return '<option value="' + escHtml(m) + '"' + (m === selected ? ' selected' : '') + '>' + escHtml(m) + '</option>';
   }).join('');
 }
+function pqApplyRowTint(tr, resultVal){
+  tr.classList.remove('pq-row-hit', 'pq-row-miss');
+  if (resultVal === 'hit') tr.classList.add('pq-row-hit');
+  else if (resultVal === 'miss') tr.classList.add('pq-row-miss');
+}
 function pqAddPicksRow(manager, pick, result){
   var tbody = document.getElementById('pqPicksBody');
   if (!tbody) return;
@@ -1658,11 +1691,28 @@ function pqAddPicksRow(manager, pick, result){
     '</select></td>' +
     '<td><button type="button" class="btn-remove pq-row-remove">&times;</button></td>';
   tbody.appendChild(tr);
+  pqApplyRowTint(tr, resultVal);
   var teamSel = tr.querySelector('.pq-row-team');
   var pickSel = tr.querySelector('.pq-row-player');
+  var resultSel = tr.querySelector('.pq-row-result');
   populatePickSelect(pickSel, manager || '', pick || '');
   teamSel.addEventListener('change', function(){ populatePickSelect(pickSel, teamSel.value, ''); });
+  resultSel.addEventListener('change', function(){ pqApplyRowTint(tr, resultSel.value); });
   tr.querySelector('.pq-row-remove').addEventListener('click', function(){ tr.remove(); });
+}
+function pqRenderWeekBand(season, week, filteredLegs){
+  var titleEl = document.querySelector('#pqWeekBand .pq-week-band-title');
+  var statsEl = document.getElementById('pqWeekBandStats');
+  if (!titleEl || !statsEl) return;
+  titleEl.textContent = 'Week ' + week + ', ' + season;
+  var submitted = filteredLegs.length;
+  var hits = filteredLegs.filter(function(l){ return l.result === 'hit'; }).length;
+  var misses = filteredLegs.filter(function(l){ return l.result === 'miss'; }).length;
+  var graded = hits + misses;
+  statsEl.innerHTML =
+    '<div class="pq-week-band-stat"><div class="pwn">' + submitted + '</div><div class="pwl">Submitted</div></div>' +
+    '<div class="pq-week-band-stat"><div class="pwn">' + graded + ' / ' + submitted + '</div><div class="pwl">Graded</div></div>' +
+    '<div class="pq-week-band-stat"><div class="pwn">' + hits + '-' + misses + '</div><div class="pwl">Hit-Miss</div></div>';
 }
 function pqLoadWeek(){
   var season = parseInt(document.getElementById('pqSeason').value, 10);
@@ -1682,6 +1732,7 @@ function pqLoadWeek(){
       Object.keys(window.MANAGER_ROSTERS || {}).sort().forEach(function(m){ pqAddPicksRow(m, '', 'pending'); });
     }
     setParlayAlert('pqSaveStatus', '', null);
+    pqRenderWeekBand(season, week, filtered);
     pqRenderTeamStats(legs);
     pqRenderHistory(legs);
   }).catch(function(err){
@@ -1743,14 +1794,21 @@ function pqRenderTeamStats(allLegs){
     Object.keys(pickCounts).forEach(function(p){ if (pickCounts[p] > favCount){ favCount = pickCounts[p]; favPlayer = p; } });
     return {manager: m, hits: hits, misses: misses, streak: streak, favPlayer: favPlayer, favCount: favCount};
   });
-  var rowsHtml = rows.map(function(r){
-    var streakLabel = r.streak.length ? (r.streak.length + (r.streak.type === 'hit' ? 'W' : 'L')) : '—';
-    var streakCls = r.streak.type === 'hit' ? 'st-hit' : (r.streak.type === 'miss' ? 'st-miss' : 'st-pending');
-    return '<tr><td>' + escHtml(r.manager) + '</td><td>' + r.hits + '-' + r.misses + '</td>' +
-      '<td><span class="parlay-slip-status ' + streakCls + '">' + streakLabel + '</span></td>' +
-      '<td>' + (r.favPlayer ? escHtml(r.favPlayer) + ' <span class="pq-pos">(' + r.favCount + 'x)</span>' : '—') + '</td></tr>';
-  }).join('');
-  wrap.innerHTML = '<table class="parlay-table"><thead><tr><th>Team</th><th>Record</th><th>Current Streak</th><th>Most Picked Player</th></tr></thead><tbody>' + rowsHtml + '</tbody></table>';
+  var rowsHtml = rows
+    .slice()
+    .sort(function(a,b){ return (b.hits - b.misses) - (a.hits - a.misses); })
+    .map(function(r){
+      var streakLabel = r.streak.length ? (r.streak.length + (r.streak.type === 'hit' ? 'W' : 'L')) : '—';
+      var streakCls = r.streak.type === 'hit' ? 'st-hit' : (r.streak.type === 'miss' ? 'st-miss' : 'st-pending');
+      var cardCls = r.streak.length >= 2 && r.streak.type === 'hit' ? ' pq-stat-hit-streak' : (r.streak.length >= 2 && r.streak.type === 'miss' ? ' pq-stat-miss-streak' : '');
+      return '<div class="pq-stat-card' + cardCls + '">' +
+        '<div class="pq-stat-name">' + escHtml(r.manager) + '</div>' +
+        '<div class="pq-stat-row"><span class="pq-stat-label">Record</span><span class="pq-stat-record">' + r.hits + '-' + r.misses + '</span></div>' +
+        '<div class="pq-stat-row"><span class="pq-stat-label">Streak</span><span class="parlay-slip-status ' + streakCls + '">' + streakLabel + '</span></div>' +
+        '<div class="pq-stat-fav">' + (r.favPlayer ? '&#11088; ' + escHtml(r.favPlayer) + ' <span class="pq-pos">(' + r.favCount + 'x)</span>' : 'No picks yet') + '</div>' +
+        '</div>';
+    }).join('');
+  wrap.innerHTML = '<div class="pq-stat-grid">' + rowsHtml + '</div>';
 }
 
 function pqLoadAndRenderHistory(){
@@ -2154,28 +2212,35 @@ def render_parlay_firebase(model):
     return f"""<h2 class="section-title">Weekly Parlay</h2>
     <div id="pqStatus" class="section-note">Loading&hellip;</div>
 
-    <div class="parlay-week-selector">
-      <label>Season <input type="number" id="pqSeason" value="{model['season']}"></label>
-      <label>Week <input type="number" id="pqWeek" value="{model['current_week']}"></label>
-      <button type="button" class="btn-secondary" id="pqLoadWeekBtn">Load</button>
+    <div id="pqWeekBand" class="parlay-week-band">
+      <div class="pq-week-band-title">Week {model['current_week']}, {model['season']}</div>
+      <div class="pq-week-band-stats" id="pqWeekBandStats"></div>
     </div>
 
-    <div class="parlay-table-wrap">
-      <table class="parlay-table">
-        <thead><tr><th>Team</th><th>Player</th><th>Result</th><th></th></tr></thead>
-        <tbody id="pqPicksBody"></tbody>
-      </table>
-    </div>
-    <div class="parlay-entry-actions">
-      <button type="button" class="btn-secondary" id="pqAddRowBtn">+ Add Row</button>
-      <button type="button" class="btn-primary" id="pqSaveBtn">Save Picks</button>
-    </div>
-    <div id="pqSaveStatus"></div>
+    <div class="parlay-card">
+      <div class="parlay-week-selector">
+        <label>Season <input type="number" id="pqSeason" value="{model['season']}"></label>
+        <label>Week <input type="number" id="pqWeek" value="{model['current_week']}"></label>
+        <button type="button" class="btn-secondary" id="pqLoadWeekBtn">Load</button>
+      </div>
 
-    <h3 class="playoff-col-title" style="margin:28px 0 10px">Team Stats &middot; {model['season']} Season</h3>
+      <div class="parlay-table-wrap">
+        <table class="parlay-table">
+          <thead><tr><th>Team</th><th>Player</th><th>Result</th><th></th></tr></thead>
+          <tbody id="pqPicksBody"></tbody>
+        </table>
+      </div>
+      <div class="parlay-entry-actions">
+        <button type="button" class="btn-secondary" id="pqAddRowBtn">+ Add Row</button>
+        <button type="button" class="btn-primary" id="pqSaveBtn">Save Picks</button>
+      </div>
+      <div id="pqSaveStatus"></div>
+    </div>
+
+    <h3 class="playoff-col-title" style="margin:28px 0 10px">&#128202; Team Stats &middot; {model['season']} Season</h3>
     <div id="pqTeamStats"></div>
 
-    <h3 class="playoff-col-title" style="margin:28px 0 10px">History</h3>
+    <h3 class="playoff-col-title" style="margin:28px 0 10px">&#127942; History</h3>
     <div id="pqHero"></div>
     <div id="pqSummary"></div>
     <div id="pqWeekly"></div>
