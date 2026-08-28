@@ -52,17 +52,19 @@ DRAFT_CAPITAL_YEARS_AHEAD = int(_env_or_default("DRAFT_CAPITAL_YEARS_AHEAD", "3"
 # in the public API. Two backends are supported, checked in this priority
 # order:
 #
-#   1. Google Sheets (live, multi-device, no project quotas) — set
-#      SHEETS_WEBAPP_URL to a deployed Apps Script Web App URL. See
-#      parlay_apps_script.gs for the one-time setup this requires (owned by
-#      whoever owns the sheet — no credentials or sheet-sharing needed on
-#      your end, just the deployed URL).
+#   1. Firebase Firestore (live, multi-device, no login required) — set
+#      FIREBASE_CONFIG to the JSON web-app config from your Firebase
+#      project. See FIREBASE_SETUP.md for the one-time setup this requires
+#      (create a free project, publish firestore.rules, register a web
+#      app). Every manager submits their own leg from their own device;
+#      grading is a batch "load week, tap results, save" flow. Nothing
+#      about this needs a code change or repo update week to week.
 #   2. Local JSON file + browser localStorage (fallback, single-user) — used
-#      automatically when Sheets isn't configured. See load_parlay_weeks()
+#      automatically when Firebase isn't configured. See load_parlay_weeks()
 #      below for the file format. Fine for a commissioner entering all 12
 #      legs themselves; doesn't sync across devices/managers.
 PARLAY_FILE = _env_or_default("PARLAY_FILE", "parlay.json")
-SHEETS_WEBAPP_URL = _env_or_default("SHEETS_WEBAPP_URL", "")
+FIREBASE_CONFIG = _env_or_default("FIREBASE_CONFIG", "")
 
 # Superlatives: 2 categories.
 #   - STAT_SUPERLATIVE_DEFS: computed automatically every generation from
@@ -932,7 +934,7 @@ def compute_stat_superlatives(league_id, teams, standings, pairs, parlay_summary
 
     # Best Parlay Picker: only fully knowable server-side when the parlay
     # tracker uses the local-file backend (its data is already in `parlay_summary`
-    # at generation time). For the live Sheets backend, this card renders as
+    # at generation time). For the live Firebase backend, this card renders as
     # "Loading…" and is filled in client-side once that tab's data loads —
     # see the splat-parlay id hooks in the Weekly Parlay JS loader.
     if parlay_summary and parlay_summary["leaderboard"]:
@@ -1407,6 +1409,19 @@ td{padding:9px 10px;border-bottom:1px solid #1f2740}
 .parlay-leg-body{flex:1;min-width:0}
 .parlay-leg-manager{font-size:.68rem;color:#8a92a8;text-transform:uppercase;letter-spacing:.4px}
 .parlay-leg-pick{font-weight:600;font-size:.9rem}
+.pq-pos{color:#8a92a8;font-weight:500;font-size:.76rem}
+
+/* ---------- Weekly Parlay: picks table + team stats table ---------- */
+.parlay-week-selector{display:flex;gap:14px;align-items:center;margin-bottom:16px;flex-wrap:wrap}
+.parlay-week-selector label{display:flex;align-items:center;gap:6px;font-size:.82rem;color:#8a92a8}
+.parlay-week-selector input{background:#0f1424;border:1px solid #2a3348;color:#e6e9f0;padding:8px 11px;border-radius:7px;width:90px;font-size:.85rem}
+.parlay-week-selector input:focus{outline:none;border-color:#3b82f6}
+.parlay-table-wrap{overflow-x:auto;margin-bottom:6px}
+.parlay-table{width:100%;border-collapse:collapse;font-size:.88rem}
+.parlay-table th{text-align:left;color:#8a92a8;padding:8px 10px;border-bottom:1px solid #2a3348;font-weight:600}
+.parlay-table td{padding:6px 8px;border-bottom:1px solid #1a2138;vertical-align:middle}
+.parlay-table td select{width:100%;min-width:120px;background:#0f1424;border:1px solid #2a3348;color:#e6e9f0;padding:7px 9px;border-radius:7px;font-size:.85rem}
+.parlay-table td select:focus{outline:none;border-color:#3b82f6}
 
 @media (max-width:640px){
   .h2h-picker{flex-direction:column;align-items:stretch}
@@ -1464,7 +1479,7 @@ function setParlayAlert(elId, message, type){
 }
 function updateBestParlayPickerCard(stats){
   // Fills the Superlatives tab's "Best Parlay Picker" card once live parlay
-  // data loads (Sheets backend only — the local-file backend's version is
+  // data loads (Firebase backend only — the local-file backend's version is
   // already baked in server-side). No-op if that card isn't on the page,
   // or there's no data yet.
   var valueEl = document.getElementById('splat-parlay-value');
@@ -1598,45 +1613,163 @@ function downloadParlayJSON(){
 }
 if (document.getElementById('parlayLegRows')) { loadParlayWeek(); }
 
-/* ---------- Weekly Parlay (Google Sheets / Apps Script-backed live version) ---------- */
-function sheetsUrl(params){
-  var url = window.SHEETS_WEBAPP_URL;
-  if (params){
-    var qs = Object.keys(params).map(function(k){ return encodeURIComponent(k) + '=' + encodeURIComponent(params[k]); }).join('&');
-    url += (url.indexOf('?') === -1 ? '?' : '&') + qs;
-  }
-  return url;
+/* ---------- Weekly Parlay (Firebase Firestore-backed live version) ---------- */
+var PQ_ICONS = { hit: ['&#10003;', 'ic-hit'], miss: ['&#10007;', 'ic-miss'], pending: ['&#8226;', 'ic-pending'] };
+function pqIcon(result){ return PQ_ICONS[result] || PQ_ICONS.pending; }
+function pqSlug(s){ return String(s || '').toLowerCase().trim().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, ''); }
+function pqDb(){ return firebase.firestore(); }
+
+async function pqFetchAllLegs(){
+  var snap = await pqDb().collection('parlayLegs').get();
+  var legs = [];
+  snap.forEach(function(d){ legs.push(d.data()); });
+  return legs;
 }
-function loadParlaySheets(){
-  var statusEl = document.getElementById('parlaySheetStatus');
-  if (!statusEl) return; // not on this tab's markup — Sheets backend not configured
-  fetch(sheetsUrl({action: 'all'}))
-    .then(function(r){ return r.json(); })
-    .then(function(data){
-      if (!data.ok) throw new Error(data.error || 'load failed');
-      renderParlaySheets(data);
-    })
+async function pqSaveResults(entries){
+  var batch = pqDb().batch();
+  entries.forEach(function(e){
+    var id = e.season + '-' + e.week + '-' + pqSlug(e.manager);
+    batch.set(pqDb().collection('parlayLegs').doc(id), {
+      season: e.season, week: e.week, manager: e.manager, pick: e.pick, result: e.result,
+      updatedAt: firebase.firestore.FieldValue.serverTimestamp(),
+    }, {merge: true});
+  });
+  await batch.commit();
+}
+
+function pqTeamOptionsHtml(selected){
+  var managers = Object.keys(window.MANAGER_ROSTERS || {}).sort();
+  return '<option value="">Select team&hellip;</option>' + managers.map(function(m){
+    return '<option value="' + escHtml(m) + '"' + (m === selected ? ' selected' : '') + '>' + escHtml(m) + '</option>';
+  }).join('');
+}
+function pqAddPicksRow(manager, pick, result){
+  var tbody = document.getElementById('pqPicksBody');
+  if (!tbody) return;
+  var resultVal = result || 'pending';
+  var tr = document.createElement('tr');
+  tr.innerHTML =
+    '<td><select class="pq-row-team">' + pqTeamOptionsHtml(manager || '') + '</select></td>' +
+    '<td><select class="pq-row-player"></select></td>' +
+    '<td><select class="pq-row-result">' +
+      '<option value="pending"' + (resultVal === 'pending' ? ' selected' : '') + '>TBD</option>' +
+      '<option value="hit"' + (resultVal === 'hit' ? ' selected' : '') + '>Hit</option>' +
+      '<option value="miss"' + (resultVal === 'miss' ? ' selected' : '') + '>Miss</option>' +
+    '</select></td>' +
+    '<td><button type="button" class="btn-remove pq-row-remove">&times;</button></td>';
+  tbody.appendChild(tr);
+  var teamSel = tr.querySelector('.pq-row-team');
+  var pickSel = tr.querySelector('.pq-row-player');
+  populatePickSelect(pickSel, manager || '', pick || '');
+  teamSel.addEventListener('change', function(){ populatePickSelect(pickSel, teamSel.value, ''); });
+  tr.querySelector('.pq-row-remove').addEventListener('click', function(){ tr.remove(); });
+}
+function pqLoadWeek(){
+  var season = parseInt(document.getElementById('pqSeason').value, 10);
+  var week = parseInt(document.getElementById('pqWeek').value, 10);
+  var tbody = document.getElementById('pqPicksBody');
+  if (!tbody) return;
+  if (!season || !week){ setParlayAlert('pqSaveStatus', 'Enter a season and week first.', 'err'); return; }
+  setParlayAlert('pqSaveStatus', 'Loading…', 'info');
+  pqFetchAllLegs().then(function(legs){
+    var filtered = legs.filter(function(l){ return Number(l.season) === season && Number(l.week) === week; });
+    tbody.innerHTML = '';
+    if (filtered.length){
+      filtered.forEach(function(l){ pqAddPicksRow(l.manager, l.pick, l.result); });
+    } else {
+      // Nothing submitted yet for this week — pre-fill one row per known
+      // manager so there's nothing to set up before filling it in.
+      Object.keys(window.MANAGER_ROSTERS || {}).sort().forEach(function(m){ pqAddPicksRow(m, '', 'pending'); });
+    }
+    setParlayAlert('pqSaveStatus', '', null);
+    pqRenderTeamStats(legs);
+    pqRenderHistory(legs);
+  }).catch(function(err){
+    setParlayAlert('pqSaveStatus', 'Could not load that week.', 'err'); console.error(err);
+  });
+}
+function pqSavePicks(){
+  var season = parseInt(document.getElementById('pqSeason').value, 10);
+  var week = parseInt(document.getElementById('pqWeek').value, 10);
+  if (!season || !week){ setParlayAlert('pqSaveStatus', 'Enter a season and week first.', 'err'); return; }
+  var rows = document.querySelectorAll('#pqPicksBody tr');
+  var entries = [];
+  rows.forEach(function(tr){
+    var manager = tr.querySelector('.pq-row-team').value;
+    var pick = tr.querySelector('.pq-row-player').value;
+    var result = tr.querySelector('.pq-row-result').value;
+    if (manager && pick) entries.push({season: season, week: week, manager: manager, pick: pick, result: result});
+  });
+  if (!entries.length){ setParlayAlert('pqSaveStatus', 'Fill in at least one team + player before saving.', 'err'); return; }
+  setParlayAlert('pqSaveStatus', 'Saving…', 'info');
+  pqSaveResults(entries).then(function(){
+    setParlayAlert('pqSaveStatus', 'Saved ' + entries.length + ' pick' + (entries.length === 1 ? '' : 's') + ' for Week ' + week + ', ' + season + '.', 'ok');
+    pqLoadWeek(); // refresh table + team stats + history with what was just saved
+  }).catch(function(err){
+    setParlayAlert('pqSaveStatus', 'Could not save: ' + err.message, 'err');
+  });
+}
+
+/* ---- Team Stats: record, current streak, most-picked player, this season ---- */
+function pqComputeStreak(sortedDecidedLegs){
+  if (!sortedDecidedLegs.length) return {type: null, length: 0};
+  var lastType = sortedDecidedLegs[sortedDecidedLegs.length - 1].result;
+  var len = 0;
+  for (var i = sortedDecidedLegs.length - 1; i >= 0; i--){
+    if (sortedDecidedLegs[i].result === lastType) len++; else break;
+  }
+  return {type: lastType, length: len};
+}
+function pqRenderTeamStats(allLegs){
+  var wrap = document.getElementById('pqTeamStats');
+  if (!wrap) return;
+  var season = window.PQ_CURRENT_SEASON;
+  var thisSeasonLegs = allLegs.filter(function(l){ return Number(l.season) === season; });
+  var byManager = {};
+  thisSeasonLegs.forEach(function(l){
+    byManager[l.manager] = byManager[l.manager] || [];
+    byManager[l.manager].push(l);
+  });
+  var managers = Object.keys(window.MANAGER_ROSTERS || {}).sort();
+  var rows = managers.map(function(m){
+    var legs = (byManager[m] || []).slice().sort(function(a,b){ return a.week - b.week; });
+    var hits = legs.filter(function(l){ return l.result === 'hit'; }).length;
+    var misses = legs.filter(function(l){ return l.result === 'miss'; }).length;
+    var decided = legs.filter(function(l){ return l.result === 'hit' || l.result === 'miss'; });
+    var streak = pqComputeStreak(decided);
+    var pickCounts = {};
+    legs.forEach(function(l){ pickCounts[l.pick] = (pickCounts[l.pick] || 0) + 1; });
+    var favPlayer = null, favCount = 0;
+    Object.keys(pickCounts).forEach(function(p){ if (pickCounts[p] > favCount){ favCount = pickCounts[p]; favPlayer = p; } });
+    return {manager: m, hits: hits, misses: misses, streak: streak, favPlayer: favPlayer, favCount: favCount};
+  });
+  var rowsHtml = rows.map(function(r){
+    var streakLabel = r.streak.length ? (r.streak.length + (r.streak.type === 'hit' ? 'W' : 'L')) : '—';
+    var streakCls = r.streak.type === 'hit' ? 'st-hit' : (r.streak.type === 'miss' ? 'st-miss' : 'st-pending');
+    return '<tr><td>' + escHtml(r.manager) + '</td><td>' + r.hits + '-' + r.misses + '</td>' +
+      '<td><span class="parlay-slip-status ' + streakCls + '">' + streakLabel + '</span></td>' +
+      '<td>' + (r.favPlayer ? escHtml(r.favPlayer) + ' <span class="pq-pos">(' + r.favCount + 'x)</span>' : '—') + '</td></tr>';
+  }).join('');
+  wrap.innerHTML = '<table class="parlay-table"><thead><tr><th>Team</th><th>Record</th><th>Current Streak</th><th>Most Picked Player</th></tr></thead><tbody>' + rowsHtml + '</tbody></table>';
+}
+
+function pqLoadAndRenderHistory(){
+  var statusEl = document.getElementById('pqStatus');
+  if (!statusEl) return;
+  pqFetchAllLegs().then(function(legs){ pqRenderHistory(legs); })
     .catch(function(err){
-      statusEl.textContent = 'Could not load parlay data — check SHEETS_WEBAPP_URL and that the Apps Script is deployed as "Anyone" access.';
+      statusEl.textContent = 'Could not load parlay data — check FIREBASE_CONFIG and that firestore.rules has been published.';
       console.error(err);
     });
 }
-function parlayLegIcon(result){
-  if (result === 'hit') return ['&#10003;', 'ic-hit'];
-  if (result === 'miss') return ['&#10007;', 'ic-miss'];
-  return ['&#8226;', 'ic-pending'];
-}
-function renderParlaySheets(data){
-  var statusEl = document.getElementById('parlaySheetStatus');
-  var heroEl = document.getElementById('parlaySheetHero');
-  var summaryEl = document.getElementById('parlaySheetSummary');
-  var weeklyEl = document.getElementById('parlaySheetWeekly');
-  var legs = data.legs || [];
+function pqRenderHistory(legs){
+  var statusEl = document.getElementById('pqStatus');
+  var heroEl = document.getElementById('pqHero');
+  var summaryEl = document.getElementById('pqSummary');
+  var weeklyEl = document.getElementById('pqWeekly');
   if (!legs.length){
-    statusEl.textContent = 'No parlay data yet — fill in a week below and Submit Week to get started.';
-    heroEl.innerHTML = '';
-    summaryEl.innerHTML = '';
-    weeklyEl.innerHTML = '';
+    statusEl.textContent = 'No picks yet — submit one above to get started.';
+    heroEl.innerHTML = ''; summaryEl.innerHTML = ''; weeklyEl.innerHTML = '';
     return;
   }
   statusEl.textContent = '';
@@ -1651,11 +1784,17 @@ function renderParlaySheets(data){
     .sort(function(a,b){ return (b.season - a.season) || (b.week - a.week); });
 
   var parlaysHit = 0, parlaysDecided = 0;
+  var managerStats = {};
   weeksSorted.forEach(function(w){
     var results = w.legs.map(function(l){ return l.result; });
     w.outcome = results.length && results.every(function(r){ return r === 'hit'; }) ? 'hit'
       : (results.some(function(r){ return r === 'miss'; }) ? 'miss' : 'pending');
     if (w.outcome !== 'pending'){ parlaysDecided++; if (w.outcome === 'hit') parlaysHit++; }
+    w.legs.forEach(function(l){
+      var st = managerStats[l.manager] = managerStats[l.manager] || {manager: l.manager, hits: 0, misses: 0};
+      if (l.result === 'hit') st.hits++;
+      else if (l.result === 'miss') st.misses++;
+    });
   });
   var rate = parlaysDecided ? Math.round((parlaysHit / parlaysDecided) * 100) : 0;
   heroEl.innerHTML =
@@ -1665,119 +1804,43 @@ function renderParlaySheets(data){
       '<div class="parlay-summary-stat"><div class="psnum">' + weeksSorted.length + '</div><div class="pslbl">Weeks Tracked</div></div>' +
     '</div>';
 
-  var stats = (data.stats || []).slice().sort(function(a,b){
-    var ra = a.hit_rate_pct == null ? -1 : a.hit_rate_pct, rb = b.hit_rate_pct == null ? -1 : b.hit_rate_pct;
-    return rb - ra;
-  });
-  updateBestParlayPickerCard(stats);
-  var maxHits = stats.reduce(function(m,s){ return Math.max(m, s.hits); }, 0);
-  var lbRows = stats.map(function(s, i){
-    var rank = i + 1;
-    var rankCls = rank <= 3 ? ' pr' + rank : '';
+  var statsList = Object.keys(managerStats).map(function(m){
+    var s = managerStats[m];
+    var decided = s.hits + s.misses;
+    s.rate = decided ? Math.round((s.hits / decided) * 1000) / 10 : null;
+    return s;
+  }).sort(function(a,b){ var ra = a.rate == null ? -1 : a.rate, rb = b.rate == null ? -1 : b.rate; return rb - ra; });
+  updateBestParlayPickerCard(statsList.map(function(s){ return {manager: s.manager, hits: s.hits, hit_rate_pct: s.rate}; }));
+  var maxHits = statsList.reduce(function(m,s){ return Math.max(m, s.hits); }, 0);
+  var lbRows = statsList.map(function(s, i){
+    var rank = i + 1, rankCls = rank <= 3 ? ' pr' + rank : '';
     var barPct = maxHits ? Math.round((s.hits / maxHits) * 100) : 0;
-    return '<div class="parlay-lb-row">' +
-      '<div class="parlay-lb-rank' + rankCls + '">' + rank + '</div>' +
-      '<div><div class="parlay-lb-name">' + escHtml(s.manager) + '</div>' +
-        '<div class="parlay-lb-bar-track"><div class="parlay-lb-bar-fill" style="width:' + barPct + '%"></div></div></div>' +
-      '<div class="parlay-lb-right"><div class="parlay-lb-rate">' + (s.hit_rate_pct == null ? '—' : s.hit_rate_pct + '%') + '</div>' +
-        '<div class="parlay-lb-record">' + s.hits + '-' + s.misses + '</div></div>' +
-    '</div>';
+    return '<div class="parlay-lb-row"><div class="parlay-lb-rank' + rankCls + '">' + rank + '</div>' +
+      '<div><div class="parlay-lb-name">' + escHtml(s.manager) + '</div><div class="parlay-lb-bar-track"><div class="parlay-lb-bar-fill" style="width:' + barPct + '%"></div></div></div>' +
+      '<div class="parlay-lb-right"><div class="parlay-lb-rate">' + (s.rate == null ? '—' : s.rate + '%') + '</div>' +
+      '<div class="parlay-lb-record">' + s.hits + '-' + s.misses + '</div></div></div>';
   }).join('');
-  summaryEl.innerHTML = '<h3 class="playoff-col-title" style="margin:18px 0 10px">Leg Leaderboard</h3>' +
-    '<div class="parlay-leaderboard">' + lbRows + '</div>';
+  summaryEl.innerHTML = '<h3 class="playoff-col-title" style="margin:18px 0 10px">Leg Leaderboard</h3><div class="parlay-leaderboard">' + lbRows + '</div>';
 
   weeklyEl.innerHTML = weeksSorted.map(function(w){
     var legsHtml = w.legs.map(function(l){
-      var iconInfo = parlayLegIcon(l.result);
-      return '<div class="parlay-leg">' +
-        '<div class="parlay-leg-icon ' + iconInfo[1] + '">' + iconInfo[0] + '</div>' +
+      var iconInfo = pqIcon(l.result);
+      return '<div class="parlay-leg"><div class="parlay-leg-icon ' + iconInfo[1] + '">' + iconInfo[0] + '</div>' +
         '<div class="parlay-leg-body"><div class="parlay-leg-manager">' + escHtml(l.manager) + '</div>' +
         '<div class="parlay-leg-pick">' + escHtml(l.pick) + '</div></div></div>';
     }).join('');
-    return '<div class="parlay-slip">' +
-      '<div class="parlay-slip-head"><div class="parlay-slip-title">Week ' + w.week + ', ' + w.season + '</div>' +
-      '<div class="parlay-slip-status st-' + w.outcome + '">' + w.outcome + '</div></div>' +
-      '<div>' + legsHtml + '</div></div>';
+    return '<div class="parlay-slip"><div class="parlay-slip-head"><div class="parlay-slip-title">Week ' + w.week + ', ' + w.season + '</div>' +
+      '<div class="parlay-slip-status st-' + w.outcome + '">' + w.outcome + '</div></div><div>' + legsHtml + '</div></div>';
   }).join('');
 }
-function loadParlayWeekSheets(){
-  var season = parseInt(document.getElementById('shSeason').value, 10);
-  var week = parseInt(document.getElementById('shWeek').value, 10);
-  var wrap = document.getElementById('shLegRows');
-  if (!wrap) return;
-  if (!season || !week){ setParlayAlert('shFormStatus', 'Enter a season and week first.', 'err'); return; }
-  setParlayAlert('shFormStatus', 'Loading…', 'info');
-  fetch(sheetsUrl({action: 'all'}))
-    .then(function(r){ return r.json(); })
-    .then(function(data){
-      if (!data.ok) throw new Error(data.error || 'load failed');
-      var legs = (data.legs || []).filter(function(l){ return Number(l.season) === season && Number(l.week) === week; });
-      wrap.innerHTML = '';
-      var count = Math.max(legs.length, 12);
-      for (var i = 0; i < count; i++){
-        var l = legs[i] || {};
-        addSheetsLegRow(l.manager, l.pick, l.result);
-      }
-      setParlayAlert('shFormStatus', legs.length
-        ? ('Loaded ' + legs.length + ' existing leg' + (legs.length === 1 ? '' : 's') + ' — edit and Submit Week to update.')
-        : 'New week — fill in legs, then Submit Week.', 'info');
-    })
-    .catch(function(err){ setParlayAlert('shFormStatus', 'Could not load that week.', 'err'); console.error(err); });
+
+if (window.FIREBASE_CONFIG) {
+  firebase.initializeApp(window.FIREBASE_CONFIG);
+  document.getElementById('pqLoadWeekBtn').addEventListener('click', pqLoadWeek);
+  document.getElementById('pqAddRowBtn').addEventListener('click', function(){ pqAddPicksRow('', '', 'pending'); });
+  document.getElementById('pqSaveBtn').addEventListener('click', pqSavePicks);
+  pqLoadWeek(); // auto-loads the current season/week by default
 }
-function addSheetsLegRow(manager, pick, result){
-  var wrap = document.getElementById('shLegRows');
-  if (!wrap) return;
-  var row = document.createElement('div');
-  row.className = 'parlay-builder-row';
-  var num = wrap.children.length + 1;
-  var managers = Object.keys(window.MANAGER_ROSTERS || {}).sort();
-  var mgrOpts = '<option value="">Select manager…</option>' + managers.map(function(m){
-    return '<option value="' + escHtml(m) + '"' + (m === manager ? ' selected' : '') + '>' + escHtml(m) + '</option>';
-  }).join('');
-  var resultOpts = ['pending','hit','miss'].map(function(r){
-    return '<option value="' + r + '"' + (r === (result || 'pending') ? ' selected' : '') + '>' + r + '</option>';
-  }).join('');
-  row.innerHTML =
-    `<div class="parlay-builder-num">${num}</div>` +
-    `<select class="sh-manager" onchange="onSheetsRowManagerChange(this)">${mgrOpts}</select>` +
-    `<select class="sh-pick" onchange="updateParlayProgress('sh')"></select>` +
-    `<select class="sh-result">${resultOpts}</select>` +
-    `<button type="button" class="btn-remove" onclick="this.parentNode.remove();updateParlayProgress('sh')">&times;</button>`;
-  wrap.appendChild(row);
-  populatePickSelect(row.querySelector('.sh-pick'), manager || '', pick || '');
-  updateParlayProgress('sh');
-}
-function onSheetsRowManagerChange(sel){
-  populatePickSelect(sel.parentNode.querySelector('.sh-pick'), sel.value, '');
-  updateParlayProgress('sh');
-}
-function submitParlayWeekSheets(){
-  var season = parseInt(document.getElementById('shSeason').value, 10);
-  var week = parseInt(document.getElementById('shWeek').value, 10);
-  if (!season || !week){ setParlayAlert('shFormStatus', 'Enter a season and week first.', 'err'); return; }
-  var rows = document.querySelectorAll('#shLegRows .parlay-builder-row');
-  var legs = [];
-  rows.forEach(function(row){
-    var manager = row.querySelector('.sh-manager').value.trim();
-    var pick = row.querySelector('.sh-pick').value.trim();
-    var result = row.querySelector('.sh-result').value;
-    if (manager && pick) legs.push({manager: manager, pick: pick, result: result});
-  });
-  if (!legs.length){ setParlayAlert('shFormStatus', 'Fill in at least one leg (manager + pick) before submitting.', 'err'); return; }
-  setParlayAlert('shFormStatus', 'Submitting…', 'info');
-  fetch(window.SHEETS_WEBAPP_URL, {
-    method: 'POST',
-    headers: {'Content-Type': 'text/plain;charset=utf-8'}, // avoids a CORS preflight Apps Script can't handle
-    body: JSON.stringify({action: 'submit_week', season: season, week: week, legs: legs}),
-  }).then(function(r){ return r.json(); })
-    .then(function(data){
-      if (!data.ok) throw new Error(data.error || 'submit failed');
-      setParlayAlert('shFormStatus', 'Submitted ' + legs.length + ' leg' + (legs.length === 1 ? '' : 's') + ' for Week ' + week + ', ' + season + '.', 'ok');
-      loadParlaySheets(); // refresh the leaderboard/weekly breakdown below
-    })
-    .catch(function(err){ setParlayAlert('shFormStatus', 'Could not submit: ' + err.message, 'err'); });
-}
-if (window.SHEETS_WEBAPP_URL) { loadParlaySheets(); loadParlayWeekSheets(); }
 """
 
 
@@ -2056,52 +2119,71 @@ def render_superlatives(stat_superlatives, voted_names):
 def render_parlay(weeks, model):
     """
     Renders the Weekly Parlay tab, picking a backend in priority order:
-      1. Google Sheets (SHEETS_WEBAPP_URL set) — live, multi-device, no
-         project quotas to run into. See parlay_apps_script.gs.
-      2. Local JSON file + localStorage — single-user fallback when Sheets
+      1. Firebase Firestore (FIREBASE_CONFIG set) — live, multi-device, no
+         login. See FIREBASE_SETUP.md and firestore.rules.
+      2. Local JSON file + localStorage — single-user fallback when Firebase
          isn't configured.
     """
-    if SHEETS_WEBAPP_URL:
-        return render_parlay_sheets(model)
+    if FIREBASE_CONFIG:
+        return render_parlay_firebase(model)
     return render_parlay_local(weeks, model)
 
 
-def render_parlay_sheets(model):
-    manager_rosters_json = json.dumps(model.get('manager_rosters', {}))
-    return f"""<h2 class="section-title">Weekly Parlay</h2>
-    <p class="section-note">Live via Google Sheets.</p>
-    <div id="parlaySheetStatus" class="section-note">Loading&hellip;</div>
-    <div id="parlaySheetHero"></div>
-    <div id="parlaySheetSummary"></div>
+def render_parlay_firebase(model):
+    """
+    Firebase-backed Weekly Parlay tab.
 
-    <h3 class="playoff-col-title" style="margin:24px 0 10px">Enter / Edit a Week</h3>
-    <p class="section-note">Pick a season and week, fill in each leg, then Submit Week &mdash; that writes the whole
-    week to the sheet in one shot, adding any new legs and updating any that already exist. Once results are in,
-    load the same week again, set each leg's hit/miss, and Submit Week again to record them.</p>
-    <div class="parlay-entry">
-      <div class="parlay-entry-row parlay-entry-header">
-        <input type="number" id="shSeason" placeholder="Season" value="{model['season']}">
-        <input type="number" id="shWeek" placeholder="Week" value="{model['current_week']}">
-        <button type="button" class="btn-secondary" onclick="loadParlayWeekSheets()">Load Week</button>
-      </div>
-      <div class="parlay-progress-wrap">
-        <div class="parlay-progress"><div class="parlay-progress-fill" id="shProgressFill" style="width:0%"></div></div>
-        <div class="parlay-progress-label" id="shProgressLabel">0 / 12 legs filled</div>
-      </div>
-      <div id="shLegRows"></div>
-      <div class="parlay-entry-actions">
-        <button type="button" class="btn-secondary" onclick="addSheetsLegRow()">+ Add Leg</button>
-        <button type="button" class="btn-primary" onclick="submitParlayWeekSheets()">Submit Week</button>
-      </div>
-      <div id="shFormStatus"></div>
+    Default view is a single editable table for the CURRENT season/week —
+    Team, Player, Result columns — pre-populated with one row per known
+    manager so there's nothing to set up before filling it in. Changing the
+    season/week fields and hitting Load switches to editing a different
+    week; Save Picks batch-writes every filled-in row at once, whether
+    that's the first pass (picks only, results TBD) or a later pass after
+    results come in (same rows, just with Result changed from TBD).
+
+    Below that: a season-long Team Stats table (record, current streak,
+    most-picked player), then the all-time History (leaderboard + every
+    past week as a "parlay slip" card).
+
+    Firebase's client SDK talks to Firestore directly from the browser, so
+    nothing here requires touching this repo again to keep tracking weekly
+    picks — see FIREBASE_SETUP.md for the one-time setup.
+    """
+    manager_rosters_json = json.dumps(model.get('manager_rosters', {}))
+    firebase_config_json = json.dumps(json.loads(FIREBASE_CONFIG)) if FIREBASE_CONFIG else "null"
+    return f"""<h2 class="section-title">Weekly Parlay</h2>
+    <div id="pqStatus" class="section-note">Loading&hellip;</div>
+
+    <div class="parlay-week-selector">
+      <label>Season <input type="number" id="pqSeason" value="{model['season']}"></label>
+      <label>Week <input type="number" id="pqWeek" value="{model['current_week']}"></label>
+      <button type="button" class="btn-secondary" id="pqLoadWeekBtn">Load</button>
     </div>
 
-    <h3 class="playoff-col-title" style="margin:24px 0 10px">Weekly Breakdown</h3>
-    <div id="parlaySheetWeekly"></div>
+    <div class="parlay-table-wrap">
+      <table class="parlay-table">
+        <thead><tr><th>Team</th><th>Player</th><th>Result</th><th></th></tr></thead>
+        <tbody id="pqPicksBody"></tbody>
+      </table>
+    </div>
+    <div class="parlay-entry-actions">
+      <button type="button" class="btn-secondary" id="pqAddRowBtn">+ Add Row</button>
+      <button type="button" class="btn-primary" id="pqSaveBtn">Save Picks</button>
+    </div>
+    <div id="pqSaveStatus"></div>
+
+    <h3 class="playoff-col-title" style="margin:28px 0 10px">Team Stats &middot; {model['season']} Season</h3>
+    <div id="pqTeamStats"></div>
+
+    <h3 class="playoff-col-title" style="margin:28px 0 10px">History</h3>
+    <div id="pqHero"></div>
+    <div id="pqSummary"></div>
+    <div id="pqWeekly"></div>
 
     <script>
-      window.SHEETS_WEBAPP_URL = {json.dumps(SHEETS_WEBAPP_URL)};
+      window.FIREBASE_CONFIG = {firebase_config_json};
       window.MANAGER_ROSTERS = {manager_rosters_json};
+      window.PQ_CURRENT_SEASON = {model['season']};
     </script>"""
 
 
@@ -2348,10 +2430,22 @@ def render(model):
   </div>
 </header>"""
 
+    firebase_scripts = ""
+    if FIREBASE_CONFIG:
+        # Firebase's "compat" SDK build exposes a plain global `firebase` object
+        # usable in an ordinary classic <script> — no bundler/ES-module import
+        # ordering to worry about, which matters here since the JS below is one
+        # big classic script relying on `firebase` already being defined by the
+        # time it runs.
+        firebase_scripts = (
+            '<script src="https://www.gstatic.com/firebasejs/10.13.0/firebase-app-compat.js"></script>'
+            '<script src="https://www.gstatic.com/firebasejs/10.13.0/firebase-firestore-compat.js"></script>'
+        )
+
     return f"""<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>{esc(model['league_name'])} · {esc(model['platform'])} Dashboard</title><style>{CSS}</style></head>
 <body>{hero}
-<div class="tabs">{tabs}</div>{body}<script>{JS}</script></body></html>"""
+<div class="tabs">{tabs}</div>{body}{firebase_scripts}<script>{JS}</script></body></html>"""
 
 
 def main():
