@@ -2177,14 +2177,44 @@ def render_superlatives(stat_superlatives, voted_names):
 def render_parlay(weeks, model):
     """
     Renders the Weekly Parlay tab, picking a backend in priority order:
-      1. Firebase Firestore (FIREBASE_CONFIG set) — live, multi-device, no
-         login. See FIREBASE_SETUP.md and firestore.rules.
-      2. Local JSON file + localStorage — single-user fallback when Firebase
-         isn't configured.
+      1. Firebase Firestore (FIREBASE_CONFIG set to valid JSON with at
+         least a projectId) — live, multi-device, no login. See
+         FIREBASE_SETUP.md and firestore.rules.
+      2. Local JSON file + localStorage — used both when FIREBASE_CONFIG
+         isn't set at all, AND when it's set but can't be parsed/is
+         missing required fields (with a visible warning banner in that
+         second case, so a misconfigured value fails loudly instead of
+         silently reverting with no explanation).
+
+    Either way, an HTML comment right before the tab's content records
+    which backend was actually selected and why — view the page's source
+    (Ctrl+U / Cmd+Option+U in most browsers) and search for "Weekly Parlay
+    backend" to check this in seconds without inspecting environment
+    variables directly.
     """
-    if FIREBASE_CONFIG:
-        return render_parlay_firebase(model)
-    return render_parlay_local(weeks, model)
+    if not FIREBASE_CONFIG:
+        return "<!-- Weekly Parlay backend: LOCAL (FIREBASE_CONFIG is not set) -->\n" + render_parlay_local(weeks, model)
+
+    try:
+        parsed = json.loads(FIREBASE_CONFIG)
+        if not isinstance(parsed, dict) or not parsed.get("projectId"):
+            raise ValueError("parsed JSON is missing a \"projectId\" field")
+    except Exception as e:
+        warning = (
+            "<div class='parlay-alert err' style='margin-bottom:16px'>"
+            f"FIREBASE_CONFIG is set but could not be used ({esc(str(e))}). Falling back to "
+            "local-file mode until this is fixed &mdash; check that the environment variable "
+            "holds the exact JSON object from the Firebase console, with no missing quotes or "
+            "shell-escaping issues (wrap it in single quotes if setting it via a shell export). "
+            "See FIREBASE_SETUP.md."
+            "</div>"
+        )
+        return (
+            f"<!-- Weekly Parlay backend: LOCAL (FIREBASE_CONFIG is set but invalid: {esc(str(e))}) -->\n"
+            + warning + render_parlay_local(weeks, model)
+        )
+
+    return f"<!-- Weekly Parlay backend: FIREBASE (projectId={esc(parsed.get('projectId', ''))}) -->\n" + render_parlay_firebase(model)
 
 
 def render_parlay_firebase(model):
