@@ -2036,6 +2036,14 @@ def render_power(power):
     return f"<table><thead><tr><th>#</th><th>Team</th><th>Score</th><th>Avg PF</th><th>Avg Margin</th><th>vs Standings</th></tr></thead><tbody>{''.join(rows)}</tbody></table>"
 
 
+def render_power_section(model):
+    sub_nav = ("<button class='subtab active' onclick=\"showSubTab('pw-power',this)\">Power Rankings</button>"
+               "<button class='subtab' onclick=\"showSubTab('pw-luck',this)\">Luck Index</button>")
+    return (f"<div class='subtabs'>{sub_nav}</div>"
+            f"<div id='pw-power' class='subpanel active'>{render_power(model['power'])}</div>"
+            f"<div id='pw-luck' class='subpanel'>{render_luck(model['luck'])}</div>")
+
+
 def render_luck(luck):
     if not luck: return "<p class='empty'>No completed weeks yet — luck index needs game data.</p>"
     rows = []
@@ -2081,14 +2089,6 @@ def render_trade_history(trade_log):
         )
         cards.append(f"<div class='rivalry-card'><div class='rivalry-meetings'>{esc(t['date'])} &middot; Week {t['week']}, {t['season']}</div><div class='matchup-teams'>{sides}</div></div>")
     return f"<div class='rivalry-grid'>{''.join(cards)}</div>"
-
-
-def render_transactions_section(activity, trade_log):
-    sub_nav = ("<button class='subtab active' onclick=\"showSubTab('tx-recent',this)\">Recent Activity</button>"
-               "<button class='subtab' onclick=\"showSubTab('tx-trades',this)\">Trade History</button>")
-    return (f"<div class='subtabs'>{sub_nav}</div>"
-            f"<div id='tx-recent' class='subpanel active'>{render_activity(activity)}</div>"
-            f"<div id='tx-trades' class='subpanel'>{render_trade_history(trade_log)}</div>")
 
 
 def render_roster_ages(rows):
@@ -2144,11 +2144,15 @@ def render_draft_capital(board):
 def render_front_office(model):
     sub_nav = ("<button class='subtab active' onclick=\"showSubTab('fo-ages',this)\">Roster Ages</button>"
                "<button class='subtab' onclick=\"showSubTab('fo-tenure',this)\">Player Tenure</button>"
-               "<button class='subtab' onclick=\"showSubTab('fo-capital',this)\">Draft Capital</button>")
+               "<button class='subtab' onclick=\"showSubTab('fo-capital',this)\">Draft Capital</button>"
+               "<button class='subtab' onclick=\"showSubTab('fo-activity',this)\">Recent Activity</button>"
+               "<button class='subtab' onclick=\"showSubTab('fo-trades',this)\">Trade History</button>")
     return (f"<div class='subtabs'>{sub_nav}</div>"
             f"<div id='fo-ages' class='subpanel active'>{render_roster_ages(model['roster_ages'])}</div>"
             f"<div id='fo-tenure' class='subpanel'>{render_player_tenure(model['player_tenure'])}</div>"
-            f"<div id='fo-capital' class='subpanel'>{render_draft_capital(model['draft_capital'])}</div>")
+            f"<div id='fo-capital' class='subpanel'>{render_draft_capital(model['draft_capital'])}</div>"
+            f"<div id='fo-activity' class='subpanel'>{render_activity(model['activity'])}</div>"
+            f"<div id='fo-trades' class='subpanel'>{render_trade_history(model['trade_log'])}</div>")
 
 
 def render_superlatives(stat_superlatives, voted_names):
@@ -2531,10 +2535,8 @@ def render(model):
     panels = [
         ("standings", "Standings", render_standings_section(model)),
         ("matchups", "Matchups", render_matchups(model)),
-        ("power", "Power Rankings", render_power(model['power'])),
-        ("luck", "Luck Index", render_luck(model['luck'])),
+        ("power", "Power Rankings", render_power_section(model)),
         ("frontoffice", "Front Office", render_front_office(model)),
-        ("transactions", "Transactions", render_transactions_section(model['activity'], model['trade_log'])),
         ("draft", "Draft Board", render_draft(model['draft'])),
         ("superlatives", "Superlatives", render_superlatives(model['stat_superlatives'], VOTED_SUPERLATIVES)),
         ("parlay", "Weekly Parlay", render_parlay(load_parlay_weeks(), model)),
