@@ -335,15 +335,21 @@ def _fetch_championship_score(league_id, week, win_rid, lose_rid):
 def _update_streak(state, team_id, outcome, year, week, name, owner):
     """
     Rolling win/loss streak tracker keyed by team identity (roster_id).
-    Call once per completed game in ASCENDING year order so streaks
-    correctly carry across a season boundary. A tie breaks both a win and
-    a loss streak. Tracks the best win streak and best loss streak seen
-    so far, each with the year/week span it covers.
+    Call once per completed game in ASCENDING year order. Streaks are
+    contained to a single season — crossing into a new year always breaks
+    a streak in progress, even if the outcome type would otherwise have
+    continued it, so "longest win/loss streak" reflects one season's run
+    rather than one stitched across a season boundary. A tie also breaks
+    both a win and a loss streak. Tracks the best win streak and best loss
+    streak seen so far, each with the year/week span it covers.
     """
     s = state.setdefault(team_id, {
         "current_type": None, "current_len": 0, "current_start": None,
-        "best_win": None, "best_loss": None,
+        "best_win": None, "best_loss": None, "last_year": None,
     })
+    if s["last_year"] is not None and year != s["last_year"]:
+        s["current_type"], s["current_len"], s["current_start"] = None, 0, None
+    s["last_year"] = year
     if outcome == "T":
         s["current_type"], s["current_len"], s["current_start"] = None, 0, None
         return
