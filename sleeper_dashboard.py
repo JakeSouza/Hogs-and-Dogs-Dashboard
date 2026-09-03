@@ -1156,9 +1156,19 @@ def build_model():
 
             rounds = (d.get("settings") or {}).get("rounds", 0) or max((p.get("round", 0) for p in picks), default=0)
             total = d.get("settings", {}).get("teams") or len(teams)
+
+            # Grid columns are keyed by roster_id, NOT draft_slot. draft_slot
+            # only represents a stable per-team column for snake drafts —
+            # for auction drafts it reflects something like "the Nth
+            # transaction completed within that round" and is NOT tied to a
+            # fixed team, so using it as the grid key scatters every team's
+            # picks across the wrong columns round to round (every pick is
+            # genuinely present in the data; the board just renders it
+            # wrong). roster_id is always a stable per-team identifier
+            # regardless of draft type, so it's used as the key universally.
             grid = {}
-            order = {}
-            slot_to_team = {}
+            roster_columns = {}   # roster_id -> team name, in first-seen order
+            first_slot_seen = {}  # roster_id -> draft_slot of that roster's first pick (snake column ordering only)
             for p in picks:
                 slot = p.get("draft_slot")
                 rnd = p.get("round")
@@ -1171,12 +1181,23 @@ def build_model():
                     # players database for some reason (e.g. a very recent
                     # rookie not yet synced)
                     nm = f"{meta.get('first_name','')} {meta.get('last_name','')}".strip() or nm or str(pid)
-                grid[(rnd, slot)] = {"player": nm, "pos": meta.get("position", ""),
+                grid[(rnd, rid)] = {"player": nm, "pos": meta.get("position", ""),
                                      "team": meta.get("team", ""), "owner": teams.get(rid, {}).get("team_name", "?")}
-                if slot and slot not in slot_to_team:
-                    slot_to_team[slot] = teams.get(rid, {}).get("team_name", f"Slot {slot}")
-            for slot in sorted(slot_to_team):
-                order[slot] = slot_to_team[slot]
+                if rid not in roster_columns:
+                    roster_columns[rid] = teams.get(rid, {}).get("team_name", f"Team {rid}")
+                    first_slot_seen[rid] = slot
+
+            # Column order: for a real snake draft, showing columns in
+            # original draft-slot order (who picked 1st, 2nd, ...) is the
+            # familiar, meaningful convention. For an auction (or any type
+            # where draft_slot isn't a stable per-team seat), fall back to
+            # alphabetical by team name since there's no "pick order" to
+            # preserve.
+            if (d.get("type") or "snake") == "snake" and all(v is not None for v in first_slot_seen.values()):
+                ordered_rids = sorted(roster_columns, key=lambda r: first_slot_seen[r])
+            else:
+                ordered_rids = sorted(roster_columns, key=lambda r: roster_columns[r])
+            order = {rid: roster_columns[rid] for rid in ordered_rids}
             draft = {"rounds": rounds, "teams": total, "grid": grid, "order": order}
     except Exception:
         draft = None
@@ -2105,7 +2126,7 @@ def render_activity(act):
 def render_draft(draft):
     if not draft: return "<p class='empty'>No draft data available yet.</p>"
     rounds = draft['rounds']; order = draft['order']; grid = draft['grid']
-    slots = sorted(order)
+    slots = list(order.keys())  # already in the correct column order; don't re-sort (keys are roster_ids, not seat numbers)
     head = "<tr><th>Round</th>" + "".join(f"<th>{esc(order[s])}</th>" for s in slots) + "</tr>"
     body = []
     for rnd in range(1, rounds + 1):
