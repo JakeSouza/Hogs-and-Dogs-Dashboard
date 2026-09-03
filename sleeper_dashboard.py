@@ -1154,38 +1154,47 @@ def build_model():
             candidates.sort(key=lambda c: (c[0].get("status") == "complete", len(c[1])), reverse=True)
             d, picks = candidates[0]
 
-            rounds = (d.get("settings") or {}).get("rounds", 0) or max((p.get("round", 0) for p in picks), default=0)
             total = d.get("settings", {}).get("teams") or len(teams)
 
-            # Grid columns are keyed by roster_id, NOT draft_slot. draft_slot
-            # only represents a stable per-team column for snake drafts —
-            # for auction drafts it reflects something like "the Nth
-            # transaction completed within that round" and is NOT tied to a
-            # fixed team, so using it as the grid key scatters every team's
-            # picks across the wrong columns round to round (every pick is
-            # genuinely present in the data; the board just renders it
-            # wrong). roster_id is always a stable per-team identifier
-            # regardless of draft type, so it's used as the key universally.
-            grid = {}
-            roster_columns = {}   # roster_id -> team name, in first-seen order
-            first_slot_seen = {}  # roster_id -> draft_slot of that roster's first pick (snake column ordering only)
+            # The grid's row axis is each team's OWN chronological pick order
+            # (their 1st player acquired, 2nd, 3rd...) rather than Sleeper's
+            # raw "round" field. For a snake draft these are identical, since
+            # every team picks exactly once per round in lockstep — but for
+            # an auction draft, "round" is really just "which slice of the
+            # overall sequential pick order this fell into," NOT "this
+            # team's Nth acquisition": one team can win 2 players while
+            # another wins 0 in the same "round" number, since there's no
+            # synchronized turn order in an auction. Using raw "round" as the
+            # grid key left real gaps in every team's column even though
+            # each team genuinely won a full roster's worth of picks — this
+            # per-team sequential index is correct for both draft types and
+            # always fills every column with zero gaps.
+            picks_by_roster = {}
             for p in picks:
-                slot = p.get("draft_slot")
-                rnd = p.get("round")
-                rid = p.get("roster_id")
-                pid = p.get("player_id")
-                meta = p.get("metadata") or {}
-                nm = player_display(pid) if pid else ""
-                if not nm or nm == str(pid):
-                    # fall back to draft metadata if the player isn't in the
-                    # players database for some reason (e.g. a very recent
-                    # rookie not yet synced)
-                    nm = f"{meta.get('first_name','')} {meta.get('last_name','')}".strip() or nm or str(pid)
-                grid[(rnd, rid)] = {"player": nm, "pos": meta.get("position", ""),
-                                     "team": meta.get("team", ""), "owner": teams.get(rid, {}).get("team_name", "?")}
-                if rid not in roster_columns:
-                    roster_columns[rid] = teams.get(rid, {}).get("team_name", f"Team {rid}")
-                    first_slot_seen[rid] = slot
+                picks_by_roster.setdefault(p.get("roster_id"), []).append(p)
+            for rid in picks_by_roster:
+                picks_by_roster[rid].sort(key=lambda p: p.get("pick_no") or 0)
+
+            grid = {}
+            roster_columns = {}
+            first_slot_seen = {}
+            rounds = 0
+            for rid, plist in picks_by_roster.items():
+                roster_columns[rid] = teams.get(rid, {}).get("team_name", f"Team {rid}")
+                first_slot_seen[rid] = plist[0].get("draft_slot") if plist else None
+                for i, p in enumerate(plist, start=1):
+                    pid = p.get("player_id")
+                    meta = p.get("metadata") or {}
+                    nm = player_display(pid) if pid else ""
+                    if not nm or nm == str(pid):
+                        # fall back to draft metadata if the player isn't in
+                        # the players database for some reason (e.g. a very
+                        # recent rookie not yet synced)
+                        nm = f"{meta.get('first_name','')} {meta.get('last_name','')}".strip() or nm or str(pid)
+                    grid[(i, rid)] = {"player": nm, "pos": meta.get("position", ""),
+                                       "team": meta.get("team", ""), "owner": roster_columns[rid]}
+                rounds = max(rounds, len(plist))
+            rounds = rounds or (d.get("settings") or {}).get("rounds", 0)
 
             # Column order: for a real snake draft, showing columns in
             # original draft-slot order (who picked 1st, 2nd, ...) is the
