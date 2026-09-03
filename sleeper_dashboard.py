@@ -1000,19 +1000,39 @@ def delta_color(delta, dead_zone=3, max_delta=15):
     return bg, border
 
 
-def compute_draft_rank_data(picks, season_pts):
+def compute_draft_rank_data(picks, season_pts, is_auction=False):
     """
-    For each drafted player: their draft positional rank (the Nth player at
-    that position actually taken, in real pick order) vs. their current
+    For each drafted player: their "draft value rank" vs. their current
     positional rank (rank by total fantasy points scored this season among
     every player drafted at that position), plus the delta between them —
-    positive means outperforming where they were drafted, negative means
+    positive means outperforming their draft value, negative means
     underperforming. Powers the draft board's heat map.
+
+    "Draft value rank" means different things depending on draft type:
+      - Snake: the Nth player at that position actually taken, in real
+        pick order — pick order genuinely reflects perceived value in a
+        snake draft (earlier = more valued).
+      - Auction: nomination order carries no value information at all —
+        two players nominated back to back can sell for $60 and $2. The
+        actual dollar amount spent is the real signal of perceived value,
+        so rank is based on cost (rank 1 = the most expensive player at
+        that position), not the arbitrary order they were nominated in.
     """
-    ordered_picks = sorted(picks, key=lambda p: p.get("pick_no") or 0)
+    if is_auction:
+        def sort_key(p):
+            try:
+                amt = float((p.get("metadata") or {}).get("amount") or 0)
+            except (TypeError, ValueError):
+                amt = 0
+            return -amt  # highest $ spent first -> rank 1, matching "1st pick = most valued"
+        ordered_picks = sorted(picks, key=sort_key)
+    else:
+        ordered_picks = sorted(picks, key=lambda p: p.get("pick_no") or 0)
+
     position_counters = {}
     player_pos = {}
     draft_pos_rank = {}
+    player_cost = {}
     for p in ordered_picks:
         pid = p.get("player_id")
         meta = p.get("metadata") or {}
@@ -1022,6 +1042,11 @@ def compute_draft_rank_data(picks, season_pts):
         position_counters[pos] = position_counters.get(pos, 0) + 1
         draft_pos_rank[pid] = position_counters[pos]
         player_pos[pid] = pos
+        if is_auction:
+            try:
+                player_cost[pid] = float(meta.get("amount") or 0)
+            except (TypeError, ValueError):
+                player_cost[pid] = 0
 
     by_position = {}
     for pid, pos in player_pos.items():
@@ -1037,7 +1062,8 @@ def compute_draft_rank_data(picks, season_pts):
         cpr = current_pos_rank.get(pid)
         delta = (dpr - cpr) if cpr else None
         rank_data[pid] = {"position": player_pos[pid], "draft_pos_rank": dpr,
-                           "current_pos_rank": cpr, "delta": delta}
+                           "current_pos_rank": cpr, "delta": delta,
+                           "cost": player_cost.get(pid) if is_auction else None}
     return rank_data
 
 
@@ -1277,8 +1303,10 @@ def build_model():
             else:
                 ordered_rids = sorted(roster_columns, key=lambda r: roster_columns[r])
             order = {rid: roster_columns[rid] for rid in ordered_rids}
-            rank_data = compute_draft_rank_data(picks, season_pts)
-            draft = {"rounds": rounds, "teams": total, "grid": grid, "order": order, "rank_data": rank_data}
+            is_auction = (d.get("type") or "snake") == "auction"
+            rank_data = compute_draft_rank_data(picks, season_pts, is_auction=is_auction)
+            draft = {"rounds": rounds, "teams": total, "grid": grid, "order": order,
+                     "rank_data": rank_data, "is_auction": is_auction}
     except Exception:
         draft = None
 
@@ -1450,6 +1478,7 @@ td{padding:9px 10px;border-bottom:1px solid #1f2740}
 .draft-cell .player{font-weight:600;font-size:.82rem;color:#f4f6fa;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:150px}
 .draft-cell .drafted-by{font-size:.7rem;color:#8a94a8;margin-top:2px}
 .draft-cell .rank-move{font-family:'JetBrains Mono',monospace;font-size:.68rem;color:#c2c8d8;margin-top:5px}
+.draft-cell .bid{font-family:'JetBrains Mono',monospace;font-weight:700;font-size:.72rem;color:#ffd23f;margin-top:4px}
 
 /* ---------- Trophy Case ---------- */
 .trophy-wall{display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:14px}
@@ -2216,11 +2245,15 @@ def render_draft(draft):
     if not draft: return "<p class='empty'>No draft data available yet.</p>"
     rounds = draft['rounds']; order = draft['order']; grid = draft['grid']
     rank_data = draft.get('rank_data') or {}
+    is_auction = draft.get('is_auction', False)
     slots = list(order.keys())  # already in the correct column order; don't re-sort (keys are roster_ids, not seat numbers)
 
     def render_cell(p):
         info = rank_data.get(p.get("player_id"))
         bg, border = delta_color(info["delta"] if info else None)
+        cost_line = ""
+        if is_auction and info and info.get("cost") is not None:
+            cost_line = f"<div class='bid'>${info['cost']:.0f}</div>"
         if info and info["delta"] is not None:
             pos = info["position"]
             arrow = "&#9650;" if info["delta"] > 0 else ("&#9660;" if info["delta"] < 0 else "&#8211;")
@@ -2233,9 +2266,10 @@ def render_draft(draft):
           <div class="player" title="{esc(p['player'])}">{esc(p['player'])}</div>
           <div class="drafted-by">{esc(p.get('pos',''))} &middot; {esc(p.get('team',''))}</div>
           {rank_line}
+          {cost_line}
         </div>"""
 
-    head = "<tr><th class='round-label'>Rd</th>" + "".join(f"<th>{esc(order[s])}</th>" for s in slots) + "</tr>"
+    head = "<tr><th class='round-label'>#</th>" + "".join(f"<th>{esc(order[s])}</th>" for s in slots) + "</tr>"
     body = []
     for rnd in range(1, rounds + 1):
         cells = f"<td class='round-label'>{rnd}</td>"
@@ -2244,12 +2278,22 @@ def render_draft(draft):
             cells += f"<td>{render_cell(p) if p else ''}</td>"
         body.append(f"<tr>{cells}</tr>")
 
-    legend = """
-    <div class="legend">
-      <span><i class="dot" style="background:rgba(34,139,34,0.7)"></i> Outperforming draft slot (4+ spots)</span>
-      <span><i class="dot" style="background:#181d29"></i> Within 3 spots of draft slot / no data</span>
-      <span><i class="dot" style="background:rgba(178,34,34,0.7)"></i> Underperforming draft slot (4+ spots)</span>
-    </div>"""
+    if is_auction:
+        note = "<p class='section-note'>Auction draft — the heat map ranks each position by $ spent (not nomination order, which carries no value signal on its own) against current fantasy points scored. Green = outproducing their price tag; red = underproducing it.</p>"
+        legend = f"""
+        {note}
+        <div class="legend">
+          <span><i class="dot" style="background:rgba(34,139,34,0.7)"></i> Outperforming $ spent (4+ spots)</span>
+          <span><i class="dot" style="background:#181d29"></i> Within 3 spots of $ rank / no data</span>
+          <span><i class="dot" style="background:rgba(178,34,34,0.7)"></i> Underperforming $ spent (4+ spots)</span>
+        </div>"""
+    else:
+        legend = """
+        <div class="legend">
+          <span><i class="dot" style="background:rgba(34,139,34,0.7)"></i> Outperforming draft slot (4+ spots)</span>
+          <span><i class="dot" style="background:#181d29"></i> Within 3 spots of draft slot / no data</span>
+          <span><i class="dot" style="background:rgba(178,34,34,0.7)"></i> Underperforming draft slot (4+ spots)</span>
+        </div>"""
 
     table = f"<table class='draft-board'><thead>{head}</thead><tbody>{''.join(body)}</tbody></table>"
     return f"<div class='draft-board-wrap'>{legend}<div class='draft-grid'>{table}</div></div>"
