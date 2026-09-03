@@ -241,6 +241,15 @@ def weekly_results(league_id, max_week):
             mu = []
         if not mu:
             continue
+        # Sleeper returns 0 (not null) for every roster's points on a week
+        # that's scheduled but hasn't actually been played yet — the schedule
+        # slot exists for the rest of the season even in week 1. Without this
+        # check, every not-yet-played matchup gets counted as a real 0-0
+        # "meeting" (inflating head-to-head history, rivalries, records, etc.
+        # for weeks that never happened). A week where literally every
+        # roster shows 0 is treated as not played and skipped entirely.
+        if all(not (t.get("custom_points") or t.get("points")) for t in mu):
+            continue
         by_matchup = {}
         for t in mu:
             rid = t.get("roster_id")
@@ -1127,8 +1136,24 @@ def build_model():
     try:
         drafts = api(f"/league/{LEAGUE_ID}/drafts") or []
         if drafts:
-            d = drafts[0]
-            picks = api(f"/draft/{d['draft_id']}/picks") or []
+            # A league can have more than one draft object on record (e.g. a
+            # restarted or aborted draft left over from setup, or a leftover
+            # mock). Blindly taking drafts[0] can silently pick a stale,
+            # incomplete one — the board dimensions (rounds/teams) come out
+            # right from settings, but most cells are empty despite the real
+            # draft having finished. Fetch picks for every draft object on
+            # record and keep whichever is actually marked complete, breaking
+            # ties by whichever has the most picks recorded.
+            candidates = []
+            for dr in drafts:
+                try:
+                    dpicks = api(f"/draft/{dr['draft_id']}/picks") or []
+                except Exception:
+                    dpicks = []
+                candidates.append((dr, dpicks))
+            candidates.sort(key=lambda c: (c[0].get("status") == "complete", len(c[1])), reverse=True)
+            d, picks = candidates[0]
+
             rounds = (d.get("settings") or {}).get("rounds", 0) or max((p.get("round", 0) for p in picks), default=0)
             total = d.get("settings", {}).get("teams") or len(teams)
             grid = {}
@@ -1138,9 +1163,15 @@ def build_model():
                 slot = p.get("draft_slot")
                 rnd = p.get("round")
                 rid = p.get("roster_id")
+                pid = p.get("player_id")
                 meta = p.get("metadata") or {}
-                nm = f"{meta.get('first_name','')} {meta.get('last_name','')}".strip()
-                grid[(rnd, slot)] = {"player": nm or p.get("player_id"), "pos": meta.get("position", ""),
+                nm = player_display(pid) if pid else ""
+                if not nm or nm == str(pid):
+                    # fall back to draft metadata if the player isn't in the
+                    # players database for some reason (e.g. a very recent
+                    # rookie not yet synced)
+                    nm = f"{meta.get('first_name','')} {meta.get('last_name','')}".strip() or nm or str(pid)
+                grid[(rnd, slot)] = {"player": nm, "pos": meta.get("position", ""),
                                      "team": meta.get("team", ""), "owner": teams.get(rid, {}).get("team_name", "?")}
                 if slot and slot not in slot_to_team:
                     slot_to_team[slot] = teams.get(rid, {}).get("team_name", f"Slot {slot}")
@@ -1301,6 +1332,11 @@ td{padding:9px 10px;border-bottom:1px solid #1f2740}
 .subtab{font-family:'Oswald',sans-serif;text-transform:uppercase;letter-spacing:.5px;background:#181d29;border:1px solid #232938;color:#9aa2b8;padding:6px 12px;border-radius:6px;cursor:pointer;font-size:.75rem;font-weight:600}
 .subtab.active{background:#1e6fff;color:#fff;border-color:#1e6fff}
 .subpanel{display:none}.subpanel.active{display:block}
+.tenure-team-panel{display:none}.tenure-team-panel.active{display:block}
+.team-select-row{display:flex;align-items:center;gap:10px;margin-bottom:14px}
+.team-select-row label{font-family:'Oswald',sans-serif;text-transform:uppercase;letter-spacing:.5px;font-size:.78rem;color:#8a94a8}
+.team-select-row select{background:#0a0d13;border:1px solid #232938;color:#f4f6fa;padding:8px 12px;border-radius:7px;font-size:.85rem}
+.team-select-row select:focus{outline:none;border-color:#1e6fff}
 .draft-grid{overflow-x:auto}
 .draft-grid table{font-size:.78rem}
 .draft-grid td,.draft-grid th{border:1px solid #1f2740;padding:5px 6px;min-width:90px;vertical-align:top}
@@ -1471,6 +1507,7 @@ td{padding:9px 10px;border-bottom:1px solid #1f2740}
 JS = """
 function showTab(id,btn){document.querySelectorAll('.tab').forEach(t=>t.classList.remove('active'));document.querySelectorAll('.panel').forEach(p=>p.classList.remove('active'));btn.classList.add('active');document.getElementById(id).classList.add('active');}
 function showSubTab(id,btn){btn.parentNode.querySelectorAll('.subtab').forEach(t=>t.classList.remove('active'));btn.parentNode.parentNode.querySelectorAll('.subpanel').forEach(p=>p.classList.remove('active'));btn.classList.add('active');document.getElementById(id).classList.add('active');}
+function showTenureTeam(team){document.querySelectorAll('.tenure-team-panel').forEach(function(p){p.classList.toggle('active', p.getAttribute('data-team') === team);});}
 function escHtml(s){
   return String(s == null ? '' : s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
 }
@@ -2113,18 +2150,36 @@ def render_roster_ages(rows):
 def render_player_tenure(rows):
     if not rows:
         return "<p class='empty'>No tenure data available yet.</p>"
-    body = "".join(
-        f"<tr><td>{esc(r['team'])}</td><td>{esc(r['player'])}</td><td>{esc(r['pos'])}</td>"
-        f"<td>{r['age'] if r['age'] is not None else '-'}</td>"
-        f"<td>{esc(r['acquired_label'])}{'*' if r['approx'] else ''}</td>"
-        f"<td>{r['seasons']}</td></tr>"
-        for r in rows
-    )
+
+    by_team = {}
+    for r in rows:
+        by_team.setdefault(r["team"], []).append(r)
+    team_names = sorted(by_team.keys())
+    options = "".join(f"<option value='{esc(t)}'>{esc(t)}</option>" for t in team_names)
+
     note = ("* Tenure is a lower bound — this player was already on the roster at the start of "
             "the tracked history window, so the true acquisition date may be earlier."
             if any(r["approx"] for r in rows) else "")
+
+    panels = []
+    for i, t in enumerate(team_names):
+        body = "".join(
+            f"<tr><td>{esc(r['player'])}</td><td>{esc(r['pos'])}</td>"
+            f"<td>{r['age'] if r['age'] is not None else '-'}</td>"
+            f"<td>{esc(r['acquired_label'])}{'*' if r['approx'] else ''}</td>"
+            f"<td>{r['seasons']}</td></tr>"
+            for r in by_team[t]
+        )
+        panels.append(
+            f"<div class='tenure-team-panel{' active' if i == 0 else ''}' data-team=\"{esc(t)}\">"
+            f"<table><thead><tr><th>Player</th><th>Pos</th><th>Age</th><th>Acquired</th><th>Seasons</th></tr></thead>"
+            f"<tbody>{body}</tbody></table></div>"
+        )
+
     return (f"<p class='section-note'>How long each currently-rostered player has been with their team.</p>"
-            f"<table><thead><tr><th>Team</th><th>Player</th><th>Pos</th><th>Age</th><th>Acquired</th><th>Seasons</th></tr></thead><tbody>{body}</tbody></table>"
+            f"<div class='team-select-row'><label for='tenureTeamSelect'>Team</label>"
+            f"<select id='tenureTeamSelect' onchange=\"showTenureTeam(this.value)\">{options}</select></div>"
+            f"{''.join(panels)}"
             + (f"<p class='section-note' style='margin-top:10px'>{note}</p>" if note else ""))
 
 
