@@ -230,10 +230,13 @@ def build_teams(league_id):
 
 def weekly_results(league_id, max_week):
     """Return scores {rid:{week:pts}}, pairs {week:[(a,b)]}, outcomes {rid:[W/L/T...]},
-    and starter_pts {week:{rid:{player_id:pts}}} (starters only — bench points
+    starter_pts {week:{rid:{player_id:pts}}} (starters only — bench points
     don't count toward a team's score, so they're excluded from head-to-head
-    "top scorer" calculations that use this)."""
-    scores, pairs, outcomes, starter_pts = {}, {}, {}, {}
+    "top scorer" calculations that use this), and season_pts {player_id:pts}
+    (every rostered player, starters AND bench, summed across the whole
+    range — used for the draft board's performance heat map, where a
+    bench stash still counts as part of "how has this pick performed")."""
+    scores, pairs, outcomes, starter_pts, season_pts = {}, {}, {}, {}, {}
     for w in range(1, max_week + 1):
         try:
             mu = api(f"/league/{league_id}/matchups/{w}")
@@ -264,6 +267,9 @@ def weekly_results(league_id, max_week):
             starters = t.get("starters") or []
             pp = t.get("players_points") or {}
             starter_pts.setdefault(w, {})[rid] = {pid: (pp.get(pid) or 0) for pid in starters if pid and pid != "0"}
+            for pid, ppts in pp.items():
+                if pid and pid != "0":
+                    season_pts[pid] = season_pts.get(pid, 0) + (ppts or 0)
         for lst in by_matchup.values():
             if len(lst) == 2:
                 (a, sa), (b, sb) = lst
@@ -274,7 +280,7 @@ def weekly_results(league_id, max_week):
                     outcomes.setdefault(b, []).append("W"); outcomes.setdefault(a, []).append("L")
                 else:
                     outcomes.setdefault(a, []).append("T"); outcomes.setdefault(b, []).append("T")
-    return scores, pairs, outcomes, starter_pts
+    return scores, pairs, outcomes, starter_pts, season_pts
 
 
 def streak_from_outcomes(seq):
@@ -413,7 +419,7 @@ def fetch_history(current_league_id, current_season, start_year):
                 "record": f"{champ['wins']}-{champ['losses']}" + (f"-{champ['ties']}" if champ.get("ties") else ""),
                 "score": champ_score,
             })
-        scores, pairs, _, starter_pts = weekly_results(league_id, MAX_WEEK)
+        scores, pairs, _, starter_pts, _ = weekly_results(league_id, MAX_WEEK)
         season_snapshots.append({"season": int(season), "teams": teams, "scores": scores, "pairs": pairs})
         for w, plist in pairs.items():
             for a, b in plist:
@@ -972,6 +978,69 @@ def compute_stat_superlatives(league_id, teams, standings, pairs, parlay_summary
 # --------------------------------------------------------------------------- #
 #  ADAPTER: build a common `model` dict from Sleeper
 # --------------------------------------------------------------------------- #
+def delta_color(delta, dead_zone=3, max_delta=15):
+    """
+    Green the more a player has risen vs. draft slot, red the more they've
+    fallen. Moves of `dead_zone` spots or fewer are treated as noise and
+    stay neutral; the gradient only ramps up beyond that. Uses the exact
+    same forest-green/firebrick-red convention as the ESPN dashboard's
+    draft board, so the heat map reads the same way across both.
+    """
+    if delta is None or abs(delta) <= dead_zone:
+        return "#181d29", "#232938"  # neutral panel/border, no meaningful change or no data
+    span = max(max_delta - dead_zone, 1)
+    magnitude = min(abs(delta) - dead_zone, span) / span  # 0..1
+    intensity = 0.25 + 0.65 * magnitude
+    if delta > 0:
+        r, g, b = 34, 139, 34   # forest green
+    else:
+        r, g, b = 178, 34, 34   # firebrick red
+    bg = f"rgba({r},{g},{b},{intensity:.2f})"
+    border = f"rgba({r},{g},{b},{min(intensity + 0.25, 1):.2f})"
+    return bg, border
+
+
+def compute_draft_rank_data(picks, season_pts):
+    """
+    For each drafted player: their draft positional rank (the Nth player at
+    that position actually taken, in real pick order) vs. their current
+    positional rank (rank by total fantasy points scored this season among
+    every player drafted at that position), plus the delta between them —
+    positive means outperforming where they were drafted, negative means
+    underperforming. Powers the draft board's heat map.
+    """
+    ordered_picks = sorted(picks, key=lambda p: p.get("pick_no") or 0)
+    position_counters = {}
+    player_pos = {}
+    draft_pos_rank = {}
+    for p in ordered_picks:
+        pid = p.get("player_id")
+        meta = p.get("metadata") or {}
+        pos = meta.get("position")
+        if not pos or not pid:
+            continue
+        position_counters[pos] = position_counters.get(pos, 0) + 1
+        draft_pos_rank[pid] = position_counters[pos]
+        player_pos[pid] = pos
+
+    by_position = {}
+    for pid, pos in player_pos.items():
+        by_position.setdefault(pos, []).append(pid)
+    current_pos_rank = {}
+    for pos, pids in by_position.items():
+        ranked = sorted(pids, key=lambda pid: -season_pts.get(pid, 0))
+        for i, pid in enumerate(ranked, start=1):
+            current_pos_rank[pid] = i
+
+    rank_data = {}
+    for pid, dpr in draft_pos_rank.items():
+        cpr = current_pos_rank.get(pid)
+        delta = (dpr - cpr) if cpr else None
+        rank_data[pid] = {"position": player_pos[pid], "draft_pos_rank": dpr,
+                           "current_pos_rank": cpr, "delta": delta}
+    return rank_data
+
+
 def build_model():
     state = api("/state/nfl")
     season = int(state.get("season") or datetime.utcnow().year)
@@ -995,7 +1064,7 @@ def build_model():
     reg_season_weeks = max(0, (lg_settings.get("playoff_week_start") or 0) - 1)
 
     teams = build_teams(LEAGUE_ID)
-    scores, pairs, outcomes, _ = weekly_results(LEAGUE_ID, MAX_WEEK)
+    scores, pairs, outcomes, _, season_pts = weekly_results(LEAGUE_ID, MAX_WEEK)
     completed = sorted(pairs.keys())
     recent_weeks = completed[-3:]
 
@@ -1192,7 +1261,8 @@ def build_model():
                         # recent rookie not yet synced)
                         nm = f"{meta.get('first_name','')} {meta.get('last_name','')}".strip() or nm or str(pid)
                     grid[(i, rid)] = {"player": nm, "pos": meta.get("position", ""),
-                                       "team": meta.get("team", ""), "owner": roster_columns[rid]}
+                                       "team": meta.get("team", ""), "owner": roster_columns[rid],
+                                       "player_id": pid, "pick_no": p.get("pick_no")}
                 rounds = max(rounds, len(plist))
             rounds = rounds or (d.get("settings") or {}).get("rounds", 0)
 
@@ -1207,7 +1277,8 @@ def build_model():
             else:
                 ordered_rids = sorted(roster_columns, key=lambda r: roster_columns[r])
             order = {rid: roster_columns[rid] for rid in ordered_rids}
-            draft = {"rounds": rounds, "teams": total, "grid": grid, "order": order}
+            rank_data = compute_draft_rank_data(picks, season_pts)
+            draft = {"rounds": rounds, "teams": total, "grid": grid, "order": order, "rank_data": rank_data}
     except Exception:
         draft = None
 
@@ -1367,9 +1438,18 @@ td{padding:9px 10px;border-bottom:1px solid #1f2740}
 .team-select-row label{font-family:'Oswald',sans-serif;text-transform:uppercase;letter-spacing:.5px;font-size:.78rem;color:#8a94a8}
 .team-select-row select{background:#0a0d13;border:1px solid #232938;color:#f4f6fa;padding:8px 12px;border-radius:7px;font-size:.85rem}
 .team-select-row select:focus{outline:none;border-color:#1e6fff}
+.draft-board-wrap{display:flex;flex-direction:column;gap:14px}
+.legend{display:flex;flex-wrap:wrap;gap:16px;font-size:.78rem;color:#8a94a8;font-family:'Oswald',sans-serif;letter-spacing:.3px}
+.legend .dot{display:inline-block;width:10px;height:10px;border-radius:50%;margin-right:6px;vertical-align:middle}
 .draft-grid{overflow-x:auto}
-.draft-grid table{font-size:.78rem}
-.draft-grid td,.draft-grid th{border:1px solid #1f2740;padding:5px 6px;min-width:90px;vertical-align:top}
+.draft-grid table.draft-board{font-size:.78rem;border-collapse:separate;border-spacing:6px}
+.draft-grid .draft-board th{font-family:'Oswald',sans-serif;text-transform:uppercase;letter-spacing:.6px;white-space:nowrap;padding:4px 8px}
+.draft-grid .draft-board th.round-label,.draft-grid .draft-board td.round-label{text-align:center;color:#8a94a8;font-family:'JetBrains Mono',monospace;font-weight:700;width:30px}
+.draft-grid .draft-board td{padding:0;vertical-align:top;min-width:130px}
+.draft-cell{background:#181d29;border:1px solid #232938;border-radius:6px;padding:8px 10px;min-height:64px}
+.draft-cell .player{font-weight:600;font-size:.82rem;color:#f4f6fa;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:150px}
+.draft-cell .drafted-by{font-size:.7rem;color:#8a94a8;margin-top:2px}
+.draft-cell .rank-move{font-family:'JetBrains Mono',monospace;font-size:.68rem;color:#c2c8d8;margin-top:5px}
 
 /* ---------- Trophy Case ---------- */
 .trophy-wall{display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:14px}
@@ -2135,19 +2215,44 @@ def render_activity(act):
 def render_draft(draft):
     if not draft: return "<p class='empty'>No draft data available yet.</p>"
     rounds = draft['rounds']; order = draft['order']; grid = draft['grid']
+    rank_data = draft.get('rank_data') or {}
     slots = list(order.keys())  # already in the correct column order; don't re-sort (keys are roster_ids, not seat numbers)
-    head = "<tr><th>Round</th>" + "".join(f"<th>{esc(order[s])}</th>" for s in slots) + "</tr>"
+
+    def render_cell(p):
+        info = rank_data.get(p.get("player_id"))
+        bg, border = delta_color(info["delta"] if info else None)
+        if info and info["delta"] is not None:
+            pos = info["position"]
+            arrow = "&#9650;" if info["delta"] > 0 else ("&#9660;" if info["delta"] < 0 else "&#8211;")
+            rank_line = f"<div class='rank-move'>{esc(pos)}{info['draft_pos_rank']} &rarr; {esc(pos)}{info['current_pos_rank']} {arrow}</div>"
+        elif info:
+            rank_line = f"<div class='rank-move'>{esc(info['position'])}{info['draft_pos_rank']} &rarr; n/a</div>"
+        else:
+            rank_line = "<div class='rank-move'>&nbsp;</div>"
+        return f"""<div class="draft-cell" style="background:{bg};border-color:{border};">
+          <div class="player" title="{esc(p['player'])}">{esc(p['player'])}</div>
+          <div class="drafted-by">{esc(p.get('pos',''))} &middot; {esc(p.get('team',''))}</div>
+          {rank_line}
+        </div>"""
+
+    head = "<tr><th class='round-label'>Rd</th>" + "".join(f"<th>{esc(order[s])}</th>" for s in slots) + "</tr>"
     body = []
     for rnd in range(1, rounds + 1):
-        cells = f"<td><b>{rnd}</b></td>"
+        cells = f"<td class='round-label'>{rnd}</td>"
         for s in slots:
             p = grid.get((rnd, s))
-            if p:
-                cells += f"<td><div class='team-name-main'>{esc(p['player'])}</div><div class='owner-name'>{esc(p['pos'])} · {esc(p['team'])}</div></td>"
-            else:
-                cells += "<td></td>"
+            cells += f"<td>{render_cell(p) if p else ''}</td>"
         body.append(f"<tr>{cells}</tr>")
-    return f"<div class='draft-grid'><table><thead>{head}</thead><tbody>{''.join(body)}</tbody></table></div>"
+
+    legend = """
+    <div class="legend">
+      <span><i class="dot" style="background:rgba(34,139,34,0.7)"></i> Outperforming draft slot (4+ spots)</span>
+      <span><i class="dot" style="background:#181d29"></i> Within 3 spots of draft slot / no data</span>
+      <span><i class="dot" style="background:rgba(178,34,34,0.7)"></i> Underperforming draft slot (4+ spots)</span>
+    </div>"""
+
+    table = f"<table class='draft-board'><thead>{head}</thead><tbody>{''.join(body)}</tbody></table>"
+    return f"<div class='draft-board-wrap'>{legend}<div class='draft-grid'>{table}</div></div>"
 
 
 def render_trade_history(trade_log):
