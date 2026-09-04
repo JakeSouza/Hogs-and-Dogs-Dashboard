@@ -81,6 +81,10 @@ VOTED_SUPERLATIVES = [
     "Biggest Fall Off",
     "Most Improved",
 ]
+VOTED_SUPERLATIVE_DETAIL = (
+    "Decided by league vote at season's end — not computed from league data. "
+    "How a tied vote gets resolved (runoff, co-winners, commissioner's call) is up to the league."
+)
 
 # Sleeper's public API does NOT expose real/legal names anywhere — only
 # 'username' and 'display_name' (both user-chosen handles). There is no
@@ -833,9 +837,11 @@ def compute_parlay_summary(weeks):
 
 def compute_transaction_counts(league_id, max_week):
     """Total completed transactions per roster this season (waiver adds,
-    free-agent adds, and trades — each party to a trade gets +1). Powers
-    the Most Active / Worst GM superlatives."""
+    free-agent adds, and trades — each party to a trade gets +1), plus the
+    timestamp of that roster's most recent transaction. Powers the Most
+    Active / Worst GM superlatives, including their tiebreakers."""
     counts = {}
+    last_ts = {}
     for w in range(1, max_week + 1):
         try:
             txs = api(f"/league/{league_id}/transactions/{w}") or []
@@ -849,9 +855,11 @@ def compute_transaction_counts(league_id, max_week):
                 adds = tx.get("adds") or {}
                 drops = tx.get("drops") or {}
                 roster_ids = set(adds.values()) | set(drops.values())
+            ts = tx.get("status_updated") or tx.get("created") or 0
             for rid in roster_ids:
                 counts[rid] = counts.get(rid, 0) + 1
-    return counts
+                last_ts[rid] = max(last_ts.get(rid, 0), ts)
+    return counts, last_ts
 
 
 def compute_strength_of_schedule(pairs, standings):
@@ -860,21 +868,32 @@ def compute_strength_of_schedule(pairs, standings):
     "hardest schedule" proxy. Sleeper doesn't expose historical week-by-week
     rank, so this uses final/current standings rather than each opponent's
     strength at the time they were actually played — a reasonable proxy,
-    not a precise point-in-time calculation.
+    not a precise point-in-time calculation. Also returns each team's
+    opponents' combined win% (a finer-grained measure than the top-half
+    count alone), used to break ties between teams with the same count.
     """
     if not standings:
-        return {}
+        return {}, {}
     team_count = len(standings)
     top_n = max(1, -(-team_count // 2))  # ceil(team_count / 2)
     top_ids = {s["roster_id"] for s in standings[:top_n]}
+    win_pct = {}
+    for s in standings:
+        g = s["wins"] + s["losses"] + s["ties"]
+        win_pct[s["roster_id"]] = (s["wins"] + 0.5 * s["ties"]) / g if g else 0
     counts = {s["roster_id"]: 0 for s in standings}
+    opp_win_pct_sum = {s["roster_id"]: 0.0 for s in standings}
     for plist in pairs.values():
         for a, b in plist:
-            if a in counts and b in top_ids:
-                counts[a] += 1
-            if b in counts and a in top_ids:
-                counts[b] += 1
-    return counts
+            if a in counts:
+                opp_win_pct_sum[a] += win_pct.get(b, 0)
+                if b in top_ids:
+                    counts[a] += 1
+            if b in counts:
+                opp_win_pct_sum[b] += win_pct.get(a, 0)
+                if a in top_ids:
+                    counts[b] += 1
+    return counts, opp_win_pct_sum
 
 
 def compute_dookie_bracket_winner(league_id, teams):
@@ -896,7 +915,13 @@ def compute_stat_superlatives(league_id, teams, standings, pairs, parlay_summary
     The 6 stat-tracked superlatives, computed fresh every generation. Each
     is a dict shaped like the SUPERLATIVES cards: name, id (for the
     Best Parlay Picker card's client-side-fill hook, see render_superlatives),
-    description, leader, value.
+    description, detail (long-form explanation of the calculation and
+    tiebreakers, shown via the card's info button), leader, value.
+
+    Every superlative that could plausibly tie ends its sort key with the
+    team name alphabetically, so ties are always resolved the same
+    deterministic way instead of silently depending on dict/list iteration
+    order (which Python and JS don't guarantee means anything meaningful).
     """
     out = []
 
@@ -904,6 +929,7 @@ def compute_stat_superlatives(league_id, teams, standings, pairs, parlay_summary
     out.append({
         "name": "Dookie Bracket Winner", "id": "splat-dookie",
         "description": "Winner of the losers bracket.",
+        "detail": "The last-place finisher of the losers bracket (the consolation bracket for the bottom half of the standings). No tiebreaker is needed — bracket play always produces a single winner.",
         "leader": dookie["name"] if dookie else "TBD", "owner": dookie.get("owner") if dookie else None,
         "value": "\U0001F4A9" if dookie else "Pending",
     })
@@ -912,6 +938,7 @@ def compute_stat_superlatives(league_id, teams, standings, pairs, parlay_summary
     out.append({
         "name": "Regular Season Winner", "id": "splat-regseason",
         "description": "Best regular season record.",
+        "detail": "Ranked by regular season record (most wins, then fewest losses). Tiebreaker: total points scored this season, highest first.",
         "leader": reg["name"] if reg else "TBD", "owner": reg.get("owner") if reg else None,
         "value": f"{reg['wins']}-{reg['losses']}" if reg else "",
     })
@@ -920,11 +947,21 @@ def compute_stat_superlatives(league_id, teams, standings, pairs, parlay_summary
     # transaction — otherwise a team with zero moves is silently excluded
     # from the dict entirely and can never win "Worst GM".
     tx_counts = {rid: 0 for rid in teams}
-    for rid, count in compute_transaction_counts(league_id, MAX_WEEK).items():
+    last_tx_ts = {}
+    _counts, _last_ts = compute_transaction_counts(league_id, MAX_WEEK)
+    for rid, count in _counts.items():
         tx_counts[rid] = count
+    last_tx_ts.update(_last_ts)
     if tx_counts:
-        most_id = max(tx_counts, key=tx_counts.get)
-        least_id = min(tx_counts, key=tx_counts.get)
+        def _team_name(rid): return teams.get(rid, {}).get("team_name", "")
+        # Most Active: most moves, then whoever moved most recently, then name.
+        # Most Active: most moves, then most recent activity, then name
+        # alphabetically first — using min() with negated numeric keys
+        # throughout so the (non-negated) name comparison naturally settles
+        # ties on whichever name comes first alphabetically.
+        most_id = min(tx_counts, key=lambda rid: (-tx_counts[rid], -last_tx_ts.get(rid, 0), _team_name(rid)))
+        # Worst GM: fewest moves, then longest since last move, then name alphabetically first.
+        least_id = min(tx_counts, key=lambda rid: (tx_counts[rid], last_tx_ts.get(rid, 0), _team_name(rid)))
         most_team, least_team = teams.get(most_id, {}), teams.get(least_id, {})
         def _moves(n): return f"{n} move" + ("" if n == 1 else "s")
         most_val, least_val = _moves(tx_counts[most_id]), _moves(tx_counts[least_id])
@@ -934,17 +971,20 @@ def compute_stat_superlatives(league_id, teams, standings, pairs, parlay_summary
     out.append({
         "name": "Most Active", "id": "splat-active",
         "description": "Most total transactions (waivers + trades) this season.",
+        "detail": "Total completed transactions this season (waiver adds, free-agent adds, and trades — each side of a trade counts once). Tiebreaker 1: whoever made a transaction most recently. Tiebreaker 2: team name, alphabetically.",
         "leader": most_team.get("team_name", "TBD"), "owner": most_team.get("owner"), "value": most_val,
     })
     out.append({
         "name": "Worst GM", "id": "splat-worstgm",
         "description": "Fewest total transactions this season.",
+        "detail": "Total completed transactions this season (waiver adds, free-agent adds, and trades — each side of a trade counts once). Tiebreaker 1: whoever has gone the longest since their last transaction. Tiebreaker 2: team name, alphabetically.",
         "leader": least_team.get("team_name", "TBD"), "owner": least_team.get("owner"), "value": least_val,
     })
 
-    sos = compute_strength_of_schedule(pairs, standings)
+    sos, opp_win_pct_sum = compute_strength_of_schedule(pairs, standings)
     if sos:
-        hardest_id = max(sos, key=sos.get)
+        def _team_name2(rid): return teams.get(rid, {}).get("team_name", "")
+        hardest_id = min(sos, key=lambda rid: (-sos[rid], -opp_win_pct_sum.get(rid, 0), _team_name2(rid)))
         hardest_team = teams.get(hardest_id, {})
         hardest_val = f"{sos[hardest_id]} top-half game" + ("" if sos[hardest_id] == 1 else "s")
     else:
@@ -953,6 +993,7 @@ def compute_stat_superlatives(league_id, teams, standings, pairs, parlay_summary
     out.append({
         "name": "Hardest Schedule", "id": "splat-hardsched",
         "description": "Most matchups against a currently top-half opponent.",
+        "detail": "Count of matchups played against a team currently in the top half of the standings. Tiebreaker 1: combined win% of every opponent faced this season (a finer-grained schedule-strength measure), highest first. Tiebreaker 2: team name, alphabetically.",
         "leader": hardest_team.get("team_name", "TBD"), "owner": hardest_team.get("owner"), "value": hardest_val,
     })
 
@@ -961,17 +1002,20 @@ def compute_stat_superlatives(league_id, teams, standings, pairs, parlay_summary
     # at generation time). For the live Firebase backend, this card renders as
     # "Loading…" and is filled in client-side once that tab's data loads —
     # see the splat-parlay id hooks in the Weekly Parlay JS loader.
+    parlay_detail = "Ranked by total hit legs across every week submitted. Tiebreaker 1: hit rate (hits / total legs graded), highest first. Tiebreaker 2: manager name, alphabetically."
     if parlay_summary and parlay_summary["leaderboard"]:
-        top = max(parlay_summary["leaderboard"], key=lambda r: (r["hits"], r["rate"]))
+        top = min(parlay_summary["leaderboard"], key=lambda r: (-r["hits"], -r["rate"], r["manager"]))
         out.append({
             "name": "Best Parlay Picker", "id": "splat-parlay",
             "description": "Most successful legs submitted to the weekly parlay.",
+            "detail": parlay_detail,
             "leader": top["manager"], "owner": None, "value": f"{top['hits']} hits ({top['rate']}%)",
         })
     else:
         out.append({
             "name": "Best Parlay Picker", "id": "splat-parlay",
             "description": "Most successful legs submitted to the weekly parlay.",
+            "detail": parlay_detail,
             "leader": "Loading…", "owner": None, "value": "",
         })
 
@@ -1499,8 +1543,12 @@ td{padding:9px 10px;border-bottom:1px solid #1f2740}
 
 /* ---------- League Records Book ---------- */
 .record-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:14px}
-.record-card{background:#181d29;border:1px solid #232938;border-radius:10px;padding:16px}
-.record-label{color:#8a94a8;font-size:.75rem;text-transform:uppercase;letter-spacing:.5px;margin-bottom:8px}
+.record-card{background:#181d29;border:1px solid #232938;border-radius:10px;padding:16px;position:relative}
+.record-label{color:#8a94a8;font-size:.75rem;text-transform:uppercase;letter-spacing:.5px;margin-bottom:8px;display:flex;align-items:center;justify-content:space-between;gap:8px}
+.info-btn{background:none;border:1px solid #3a4256;color:#8a94a8;width:16px;height:16px;border-radius:50%;font-size:.65rem;font-style:italic;font-family:Georgia,serif;line-height:1;cursor:pointer;padding:0;flex-shrink:0;display:inline-flex;align-items:center;justify-content:center}
+.info-btn:hover{border-color:#1e6fff;color:#1e6fff}
+.info-panel{display:none;position:absolute;left:12px;right:12px;top:100%;margin-top:6px;background:#0a0d13;border:1px solid #1e6fff;border-radius:8px;padding:10px 12px;font-size:.72rem;color:#c2c8d8;line-height:1.45;z-index:5;box-shadow:0 8px 20px rgba(0,0,0,0.4);text-transform:none;letter-spacing:normal}
+.info-panel.open{display:block}
 .record-value{font-size:1.4rem;font-weight:800;color:#f4f6fa;margin-bottom:8px}
 .record-unit{font-size:.75rem;font-weight:600;color:#8a94a8}
 .record-card .team-name-main{font-size:.88rem}
@@ -1654,6 +1702,18 @@ JS = """
 function showTab(id,btn){document.querySelectorAll('.tab').forEach(t=>t.classList.remove('active'));document.querySelectorAll('.panel').forEach(p=>p.classList.remove('active'));btn.classList.add('active');document.getElementById(id).classList.add('active');}
 function showSubTab(id,btn){btn.parentNode.querySelectorAll('.subtab').forEach(t=>t.classList.remove('active'));btn.parentNode.parentNode.querySelectorAll('.subpanel').forEach(p=>p.classList.remove('active'));btn.classList.add('active');document.getElementById(id).classList.add('active');}
 function showTenureTeam(team){document.querySelectorAll('.tenure-team-panel').forEach(function(p){p.classList.toggle('active', p.getAttribute('data-team') === team);});}
+function toggleInfo(id){
+  var panel = document.getElementById(id);
+  if (!panel) return;
+  var wasOpen = panel.classList.contains('open');
+  document.querySelectorAll('.info-panel.open').forEach(function(p){ p.classList.remove('open'); });
+  if (!wasOpen) panel.classList.add('open');
+}
+document.addEventListener('click', function(e){
+  if (!e.target.closest('.info-btn') && !e.target.closest('.info-panel')){
+    document.querySelectorAll('.info-panel.open').forEach(function(p){ p.classList.remove('open'); });
+  }
+});
 function escHtml(s){
   return String(s == null ? '' : s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
 }
@@ -1707,7 +1767,8 @@ function updateBestParlayPickerCard(stats){
   var top = stats.slice().sort(function(a,b){
     if (b.hits !== a.hits) return b.hits - a.hits;
     var ra = a.hit_rate_pct == null ? -1 : a.hit_rate_pct, rb = b.hit_rate_pct == null ? -1 : b.hit_rate_pct;
-    return rb - ra;
+    if (rb !== ra) return rb - ra;
+    return a.manager.localeCompare(b.manager);
   })[0];
   valueEl.textContent = top.hits + ' hits (' + (top.hit_rate_pct == null ? '—' : top.hit_rate_pct + '%') + ')';
   leaderEl.innerHTML = '<div class="team-cell-inner"><div><div class="team-name-main">' + escHtml(top.manager) + '</div></div></div>';
@@ -2403,9 +2464,13 @@ def render_front_office(model):
 
 
 def render_superlatives(stat_superlatives, voted_names):
+    def info_btn(uid, detail):
+        return (f"<button type='button' class='info-btn' onclick=\"toggleInfo('{uid}')\" aria-label='How this is calculated'>i</button>"
+                f"<div class='info-panel' id='{uid}'>{esc(detail)}</div>")
+
     stat_cards = "".join(
         f"<div class='record-card'>"
-        f"<div class='record-label'>{esc(s['name'])}</div>"
+        f"<div class='record-label'>{esc(s['name'])}{info_btn(s['id'] + '-info', s.get('detail', s.get('description', '')))}</div>"
         f"<div class='record-value' id='{s['id']}-value'>{esc(s.get('value', ''))}</div>"
         f"<div id='{s['id']}-leader'>{team_cell(s.get('leader', 'TBD'), s.get('owner'))}</div>"
         f"<div class='record-context'>{esc(s.get('description', ''))}</div></div>"
@@ -2413,11 +2478,11 @@ def render_superlatives(stat_superlatives, voted_names):
     )
     voted_cards = "".join(
         f"<div class='record-card'>"
-        f"<div class='record-label'>{esc(name)}</div>"
+        f"<div class='record-label'>{esc(name)}{info_btn('splat-voted-' + str(i) + '-info', VOTED_SUPERLATIVE_DETAIL)}</div>"
         f"<div class='record-value'>&mdash;</div>"
         f"{team_cell('Vote pending')}"
         f"<div class='record-context'>Decided by league vote at season's end.</div></div>"
-        for name in voted_names
+        for i, name in enumerate(voted_names)
     )
     return (f"<h2 class='section-title'>Superlatives</h2>"
             f"<p class='section-note'>Tracked automatically throughout the season.</p>"
