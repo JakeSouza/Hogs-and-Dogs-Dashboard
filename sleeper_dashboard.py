@@ -39,11 +39,13 @@ RECENT_ACTIVITY_COUNT = int(_env_or_default("RECENT_ACTIVITY_COUNT", "25"))
 HISTORY_START_YEAR = int(_env_or_default("HISTORY_START_YEAR", "2018"))
 MAX_WEEK = 18  # NFL regular season + small buffer
 
-# Number of rounds in this league's rookie-only draft. Used to build the
-# future Draft Capital board when there's no upcoming draft object yet to
-# read the round count from (falls back to the most recent draft's round
-# count automatically when one is available).
-ROOKIE_DRAFT_ROUNDS = int(_env_or_default("ROOKIE_DRAFT_ROUNDS", "4"))
+# Number of rounds in this league's rookie-only draft. This always drives
+# the future Draft Capital board directly — it's intentionally NOT derived
+# from the actual most recent draft's round count, since that draft could
+# be a much longer startup/auction draft (e.g. 20+ rounds to fill a full
+# roster) that has nothing to do with how long a future rookie-only draft
+# actually runs.
+ROOKIE_DRAFT_ROUNDS = int(_env_or_default("ROOKIE_DRAFT_ROUNDS", "3"))
 # How many future seasons of rookie picks to show on the Draft Capital board.
 DRAFT_CAPITAL_YEARS_AHEAD = int(_env_or_default("DRAFT_CAPITAL_YEARS_AHEAD", "3"))
 
@@ -924,7 +926,8 @@ def compute_stat_superlatives(league_id, teams, standings, pairs, parlay_summary
         most_id = max(tx_counts, key=tx_counts.get)
         least_id = min(tx_counts, key=tx_counts.get)
         most_team, least_team = teams.get(most_id, {}), teams.get(least_id, {})
-        most_val, least_val = f"{tx_counts[most_id]} moves", f"{tx_counts[least_id]} moves"
+        def _moves(n): return f"{n} move" + ("" if n == 1 else "s")
+        most_val, least_val = _moves(tx_counts[most_id]), _moves(tx_counts[least_id])
     else:
         most_team = least_team = {}
         most_val = least_val = "Pending"
@@ -943,7 +946,7 @@ def compute_stat_superlatives(league_id, teams, standings, pairs, parlay_summary
     if sos:
         hardest_id = max(sos, key=sos.get)
         hardest_team = teams.get(hardest_id, {})
-        hardest_val = f"{sos[hardest_id]} top-half games"
+        hardest_val = f"{sos[hardest_id]} top-half game" + ("" if sos[hardest_id] == 1 else "s")
     else:
         hardest_team = {}
         hardest_val = "Pending"
@@ -1335,8 +1338,12 @@ def build_model():
     acquisition, trade_log = fetch_transaction_history(LEAGUE_ID, season, HISTORY_START_YEAR)
     roster_ages = compute_roster_ages(teams)
     player_tenure = compute_player_tenure(teams, acquisition, season)
-    base_rounds = (draft or {}).get("rounds") or ROOKIE_DRAFT_ROUNDS
-    draft_capital = fetch_draft_capital(LEAGUE_ID, teams, base_rounds, DRAFT_CAPITAL_YEARS_AHEAD, season)
+    # Deliberately NOT derived from the actual last draft's round count —
+    # that draft could be a much longer startup/auction draft (e.g. 20+
+    # rounds to fill a full roster), which says nothing about how many
+    # rounds a future rookie-only draft runs. ROOKIE_DRAFT_ROUNDS is the
+    # single source of truth for the Draft Capital board's round count.
+    draft_capital = fetch_draft_capital(LEAGUE_ID, teams, ROOKIE_DRAFT_ROUNDS, DRAFT_CAPITAL_YEARS_AHEAD, season)
 
     # ---- head-to-head lookup (Matchups tab tool) ----
     h2h_lookup = build_h2h_lookup(rivalries, teams, name_by_id)
@@ -1407,7 +1414,7 @@ h1{font-size:1.6rem;margin-bottom:4px}
 
 /* ---------- Hero / title banner ---------- */
 .hero{position:relative;overflow:hidden;border-radius:14px;border:1px solid #232938;padding:36px 32px;margin-bottom:28px;background:linear-gradient(115deg,#0a0d13 60%,#10141f 100%)}
-.hero-glow{position:absolute;top:-50px;right:-50px;width:320px;height:320px;background:#ff5b1f;opacity:.13;clip-path:polygon(28% 0,100% 0,100% 72%,72% 100%,0 100%,0 28%);pointer-events:none}
+.hero-glow{position:absolute;top:-40px;right:-40px;width:220px;height:220px;background:#ff5b1f;opacity:.14;clip-path:polygon(30% 0,100% 0,100% 70%,70% 100%,0 100%,0 30%);pointer-events:none}
 .hero-content{position:relative;z-index:1}
 .hero-eyebrow{font-family:'Oswald',sans-serif;color:#ff5b1f;font-size:12px;font-weight:600;letter-spacing:2.5px;text-transform:uppercase;margin-bottom:10px}
 .hero-title{font-family:'Archivo Black',sans-serif;text-transform:uppercase;margin:0 0 18px 0;font-size:42px;font-weight:400;letter-spacing:-1px;line-height:1.05;
@@ -1425,7 +1432,7 @@ h1{font-size:1.6rem;margin-bottom:4px}
 .ticker{background:#1e6fff;color:#fff;font-family:'Oswald',sans-serif;font-weight:600;font-size:12px;letter-spacing:.4px;padding:9px 0;overflow:hidden;white-space:nowrap;border-radius:10px;margin-bottom:18px}
 .ticker-track{display:inline-block;padding-left:100%;animation:ticker-scroll 38s linear infinite}
 .ticker-track span{display:inline-block;padding-right:56px}
-.ticker-track span::after{content:'\25CF';color:#ffd23f;margin-left:56px;font-size:8px;vertical-align:middle}
+.ticker-track span::after{content:'';display:inline-block;width:6px;height:6px;border-radius:50%;background:#ffd23f;margin:0 0 1px 56px;vertical-align:middle}
 @keyframes ticker-scroll{from{transform:translateX(0)}to{transform:translateX(-100%)}}
 @media (prefers-reduced-motion:reduce){.ticker-track{animation:none;padding-left:16px}}
 .tabs{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:18px}
@@ -1721,7 +1728,7 @@ function updateH2H(){
   var ptsA = flip ? d.pts_b : d.pts_a, ptsB = flip ? d.pts_a : d.pts_b;
   var topA = flip ? d.top_scorer_b : d.top_scorer_a, topB = flip ? d.top_scorer_a : d.top_scorer_b;
   var html = "<div class='record-grid'>";
-  html += "<div class='record-card'><div class='record-label'>All-Time Record</div><div class='record-value'>"+winsA+" - "+winsB+"</div><div class='record-context'>"+nameA+" vs "+nameB+" &middot; "+d.meetings+" meetings</div></div>";
+  html += "<div class='record-card'><div class='record-label'>All-Time Record</div><div class='record-value'>"+winsA+" - "+winsB+"</div><div class='record-context'>"+nameA+" vs "+nameB+" &middot; "+d.meetings+" meeting"+(d.meetings===1?"":"s")+"</div></div>";
   html += "<div class='record-card'><div class='record-label'>Total Points</div><div class='record-value'>"+ptsA.toFixed(1)+" &ndash; "+ptsB.toFixed(1)+"</div><div class='record-context'>"+nameA+" vs "+nameB+"</div></div>";
   if(d.closest){ html += "<div class='record-card'><div class='record-label'>Closest Game</div><div class='record-value'>"+d.closest.margin.toFixed(1)+" <span class='record-unit'>pt margin</span></div><div class='record-context'>Week "+d.closest.week+", "+d.closest.season+"</div></div>"; }
   if(d.blowout){ html += "<div class='record-card'><div class='record-label'>Biggest Blowout</div><div class='record-value'>"+d.blowout.margin.toFixed(1)+" <span class='record-unit'>pt margin</span></div><div class='record-context'>Week "+d.blowout.week+", "+d.blowout.season+"</div></div>"; }
@@ -1812,7 +1819,7 @@ function saveParlayWeek(){
   var entry = {season: season, week: week, legs: legs};
   if (idx >= 0) draft[idx] = entry; else draft.push(entry);
   saveParlayDraft(draft);
-  setParlayAlert('parlayStatus', 'Saved to this browser (' + legs.length + ' legs). Download the file below to make it permanent.', 'ok');
+  setParlayAlert('parlayStatus', 'Saved to this browser (' + legs.length + ' leg' + (legs.length === 1 ? '' : 's') + '). Download the file below to make it permanent.', 'ok');
 }
 function downloadParlayJSON(){
   var all = mergedParlayWeeks();
@@ -2145,7 +2152,7 @@ def render_playoff_picture(picture):
 
     def row(e, badge_class):
         rec = f"{e['wins']}-{e['losses']}" + (f"-{e['ties']}" if e.get('ties') else "")
-        detail = "Season complete" if e["remaining"] == 0 else f"{e['remaining']} games left"
+        detail = "Season complete" if e["remaining"] == 0 else f"{e['remaining']} game{'s' if e['remaining'] != 1 else ''} left"
         return f"""<div class='playoff-row'><div class='playoff-seed'>{e['rank']}</div>
           <div class='team-cell'>{team_cell(e['name'], e.get('owner'), e.get('logo'))}</div>
           <div class='playoff-record'>{rec}</div><div class='playoff-detail'>{detail}</div>
@@ -2722,7 +2729,8 @@ def render_history(hist, current_season):
     if hist['rivalries']:
         cards = []
         for r in hist['rivalries']:
-            cards.append(f"""<div class='rivalry-card'><div class='rivalry-meetings'>{r['meetings']} all-time meetings</div>
+            meeting_word = "meeting" if r['meetings'] == 1 else "meetings"
+            cards.append(f"""<div class='rivalry-card'><div class='rivalry-meetings'>{r['meetings']} all-time {meeting_word}</div>
               <div class='matchup-teams'><div class='matchup-team'><div class='team-name-main'>{esc(r['name_a'])}</div><div class='team-record'>{r['wins_a']}-{r['wins_b']}</div><div class='owner-name'>{r['pts_a']} pts</div></div>
               <div class='vs'>vs</div>
               <div class='matchup-team'><div class='team-name-main'>{esc(r['name_b'])}</div><div class='team-record'>{r['wins_b']}-{r['wins_a']}</div><div class='owner-name'>{r['pts_b']} pts</div></div></div></div>""")
