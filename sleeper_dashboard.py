@@ -804,6 +804,7 @@ def compute_parlay_summary(weeks):
     if not weeks:
         return None
     weekly, manager_stats = [], {}
+    manager_decided_seq = {}  # manager -> ordered list of 'hit'/'miss' results, season/week order, pending skipped
     parlays_hit = parlays_decided = 0
     for wk in sorted(weeks, key=lambda w: (w.get("season", 0), w.get("week", 0))):
         legs = wk.get("legs") or []
@@ -825,12 +826,33 @@ def compute_parlay_summary(weeks):
             if r == "hit": st["hits"] += 1
             elif r == "miss": st["misses"] += 1
             else: st["pending"] += 1
+            if r in ("hit", "miss"):
+                manager_decided_seq.setdefault(mgr, []).append(r)
         weekly.append({"season": wk.get("season"), "week": wk.get("week"), "legs": legs, "outcome": outcome})
+
+    def _best_streak(seq):
+        # Longest run of consecutive hits ANYWHERE in the season (not just
+        # the current trailing streak) — used as a tiebreaker for Best
+        # Parlay Picker that's genuinely independent of total hit count,
+        # unlike hit rate: if every manager submits a leg every week, they
+        # all have the same denominator, so rate ties in lockstep with hits
+        # and can't actually break anything. Best streak can differ even
+        # when hit counts and rates are identical.
+        best = cur = 0
+        for r in seq:
+            if r == "hit":
+                cur += 1
+                best = max(best, cur)
+            else:
+                cur = 0
+        return best
+
     leaderboard = []
     for mgr, st in manager_stats.items():
         decided = st["hits"] + st["misses"]
         rate = (st["hits"] / decided * 100) if decided else 0
-        leaderboard.append({"manager": mgr, **st, "rate": round(rate, 1), "decided": decided})
+        best_streak = _best_streak(manager_decided_seq.get(mgr, []))
+        leaderboard.append({"manager": mgr, **st, "rate": round(rate, 1), "decided": decided, "best_streak": best_streak})
     leaderboard.sort(key=lambda x: (-x["rate"], -x["decided"]))
     return {"weekly": weekly, "leaderboard": leaderboard, "parlays_hit": parlays_hit, "parlays_decided": parlays_decided}
 
@@ -860,6 +882,105 @@ def compute_transaction_counts(league_id, max_week):
                 counts[rid] = counts.get(rid, 0) + 1
                 last_ts[rid] = max(last_ts.get(rid, 0), ts)
     return counts, last_ts
+
+
+def compute_optimal_lineup_score(player_points, roster_positions):
+    """
+    Given a full roster's {player_id: points} for one week and the
+    league's roster_positions list (every slot to fill, e.g. ['QB','RB',
+    'RB','WR','WR','TE','FLEX','DEF','K','BN','BN',...]), return the
+    highest score that roster could have posted that week.
+
+    Standard single-position slots (QB/RB/WR/TE/DEF/K/etc.) are filled
+    with the top-N remaining players at that exact position — provably
+    optimal on its own since a dedicated slot has nowhere else to draw
+    from. FLEX-type slots (FLEX, SUPER_FLEX, WRRB_FLEX, REC_FLEX) are then
+    filled, most-restrictive-pool first, with the best remaining eligible
+    player. This is the standard "fill dedicated slots first, flex last"
+    approach used by lineup-optimizer tools, and is optimal for leagues
+    with a single flex type; with multiple different flex types active at
+    once it's a well-tested heuristic rather than a formally proven
+    optimum, since that general case is a harder assignment problem.
+    Bench/IR/taxi slots are excluded — only actual starting slots count.
+    """
+    FLEX_ELIGIBLE = {
+        "FLEX": {"RB", "WR", "TE"},
+        "SUPER_FLEX": {"QB", "RB", "WR", "TE"},
+        "WRRB_FLEX": {"RB", "WR"},
+        "REC_FLEX": {"WR", "TE"},
+    }
+    EXCLUDE_SLOTS = {"BN", "IR", "TAXI"}
+
+    starting_slots = [p for p in (roster_positions or []) if p not in EXCLUDE_SLOTS]
+    dedicated_slots = [s for s in starting_slots if s not in FLEX_ELIGIBLE]
+    flex_slots = sorted((s for s in starting_slots if s in FLEX_ELIGIBLE), key=lambda s: len(FLEX_ELIGIBLE[s]))
+
+    players_db = get_players()
+    pos_of = {}
+    for pid in player_points:
+        p = players_db.get(str(pid))
+        pos_of[pid] = (p.get("position") if p else None) or ""
+
+    used = set()
+    total = 0.0
+
+    needed = {}
+    for s in dedicated_slots:
+        needed[s] = needed.get(s, 0) + 1
+    for pos, count in needed.items():
+        candidates = sorted(
+            (pid for pid in player_points if pid not in used and pos_of.get(pid) == pos),
+            key=lambda pid: -player_points[pid],
+        )
+        for pid in candidates[:count]:
+            total += player_points[pid]
+            used.add(pid)
+
+    for slot in flex_slots:
+        eligible = FLEX_ELIGIBLE.get(slot, {"RB", "WR", "TE"})
+        candidates = sorted(
+            (pid for pid in player_points if pid not in used and pos_of.get(pid) in eligible),
+            key=lambda pid: -player_points[pid],
+        )
+        if candidates:
+            pid = candidates[0]
+            total += player_points[pid]
+            used.add(pid)
+
+    return total
+
+
+def compute_lineup_efficiency(league_id, max_week, roster_positions):
+    """
+    Per-roster season totals of actual points scored vs. the optimal
+    lineup score possible from their full roster each week. Powers the
+    Worst GM superlative (lowest actual/optimal ratio — the team leaving
+    the largest share of their own bench's points on the table).
+    """
+    actual_totals, optimal_totals = {}, {}
+    for w in range(1, max_week + 1):
+        try:
+            mu = api(f"/league/{league_id}/matchups/{w}") or []
+        except Exception:
+            mu = []
+        if not mu:
+            continue
+        if all(not (t.get("custom_points") or t.get("points")) for t in mu):
+            continue  # not played yet — same guard as weekly_results()
+        for t in mu:
+            rid = t.get("roster_id")
+            pts = t.get("custom_points")
+            if pts is None:
+                pts = t.get("points")
+            if pts is None:
+                continue
+            pp = {pid: (v or 0) for pid, v in (t.get("players_points") or {}).items() if pid and pid != "0"}
+            if not pp:
+                continue
+            optimal = compute_optimal_lineup_score(pp, roster_positions)
+            actual_totals[rid] = actual_totals.get(rid, 0) + float(pts)
+            optimal_totals[rid] = optimal_totals.get(rid, 0) + optimal
+    return actual_totals, optimal_totals
 
 
 def compute_strength_of_schedule(pairs, standings):
@@ -910,7 +1031,7 @@ def compute_dookie_bracket_winner(league_id, teams):
     return {"name": t["team_name"], "owner": t.get("owner")} if t else None
 
 
-def compute_stat_superlatives(league_id, teams, standings, pairs, parlay_summary):
+def compute_stat_superlatives(league_id, teams, standings, pairs, parlay_summary, roster_positions):
     """
     The 6 stat-tracked superlatives, computed fresh every generation. Each
     is a dict shaped like the SUPERLATIVES cards: name, id (for the
@@ -943,57 +1064,80 @@ def compute_stat_superlatives(league_id, teams, standings, pairs, parlay_summary
         "value": f"{reg['wins']}-{reg['losses']}" if reg else "",
     })
 
+    def _team_name(rid): return teams.get(rid, {}).get("team_name", "")
+
     # Every team gets a 0-default entry, not just teams that appear in a
     # transaction — otherwise a team with zero moves is silently excluded
-    # from the dict entirely and can never win "Worst GM".
+    # from the dict entirely.
     tx_counts = {rid: 0 for rid in teams}
-    last_tx_ts = {}
-    _counts, _last_ts = compute_transaction_counts(league_id, MAX_WEEK)
+    _counts, last_tx_ts = compute_transaction_counts(league_id, MAX_WEEK)
     for rid, count in _counts.items():
         tx_counts[rid] = count
-    last_tx_ts.update(_last_ts)
     if tx_counts:
-        def _team_name(rid): return teams.get(rid, {}).get("team_name", "")
-        # Most Active: most moves, then whoever moved most recently, then name.
-        # Most Active: most moves, then most recent activity, then name
+        # Most moves, then whoever moved most recently, then name
         # alphabetically first — using min() with negated numeric keys
         # throughout so the (non-negated) name comparison naturally settles
         # ties on whichever name comes first alphabetically.
         most_id = min(tx_counts, key=lambda rid: (-tx_counts[rid], -last_tx_ts.get(rid, 0), _team_name(rid)))
-        # Worst GM: fewest moves, then longest since last move, then name alphabetically first.
-        least_id = min(tx_counts, key=lambda rid: (tx_counts[rid], last_tx_ts.get(rid, 0), _team_name(rid)))
-        most_team, least_team = teams.get(most_id, {}), teams.get(least_id, {})
-        def _moves(n): return f"{n} move" + ("" if n == 1 else "s")
-        most_val, least_val = _moves(tx_counts[most_id]), _moves(tx_counts[least_id])
+        most_team = teams.get(most_id, {})
+        most_val = f"{tx_counts[most_id]} move" + ("" if tx_counts[most_id] == 1 else "s")
     else:
-        most_team = least_team = {}
-        most_val = least_val = "Pending"
+        most_team = {}
+        most_val = "Pending"
     out.append({
         "name": "Most Active", "id": "splat-active",
         "description": "Most total transactions (waivers + trades) this season.",
         "detail": "Total completed transactions this season (waiver adds, free-agent adds, and trades — each side of a trade counts once). Tiebreaker 1: whoever made a transaction most recently. Tiebreaker 2: team name, alphabetically.",
         "leader": most_team.get("team_name", "TBD"), "owner": most_team.get("owner"), "value": most_val,
     })
+
+    # Worst GM: lineup efficiency — actual points scored vs. the best
+    # lineup that could have been set from the full roster each week.
+    # Lowest efficiency (most points left on the bench, proportionally)
+    # "wins". Tiebreak by largest absolute points left on the bench, since
+    # two teams tied on percentage haven't necessarily wasted the same
+    # amount of real value (a deeper/higher-scoring roster can waste more
+    # raw points at the same efficiency rate).
+    actual_totals, optimal_totals = compute_lineup_efficiency(league_id, MAX_WEEK, roster_positions)
+    efficiency, bench_left = {}, {}
+    for rid in teams:
+        opt = optimal_totals.get(rid, 0)
+        act = actual_totals.get(rid, 0)
+        efficiency[rid] = (act / opt) if opt else None
+        bench_left[rid] = max(0.0, opt - act)
+    scored = {rid: e for rid, e in efficiency.items() if e is not None}
+    if scored:
+        worst_id = min(scored, key=lambda rid: (scored[rid], -bench_left.get(rid, 0), _team_name(rid)))
+        worst_team = teams.get(worst_id, {})
+        worst_val = f"{scored[worst_id] * 100:.1f}% of optimal"
+    else:
+        worst_team = {}
+        worst_val = "Pending"
     out.append({
         "name": "Worst GM", "id": "splat-worstgm",
-        "description": "Fewest total transactions this season.",
-        "detail": "Total completed transactions this season (waiver adds, free-agent adds, and trades — each side of a trade counts once). Tiebreaker 1: whoever has gone the longest since their last transaction. Tiebreaker 2: team name, alphabetically.",
-        "leader": least_team.get("team_name", "TBD"), "owner": least_team.get("owner"), "value": least_val,
+        "description": "Scored the smallest share of their own optimal lineup this season.",
+        "detail": "Each week, compares points actually scored to the best possible lineup from that team's full roster (accounting for FLEX-eligible positions). Ranked by season-long actual \u00f7 optimal — lowest wins. Tiebreaker 1: most total points left on the bench, highest first. Tiebreaker 2: team name, alphabetically.",
+        "leader": worst_team.get("team_name", "TBD"), "owner": worst_team.get("owner"), "value": worst_val,
     })
 
-    sos, opp_win_pct_sum = compute_strength_of_schedule(pairs, standings)
-    if sos:
-        def _team_name2(rid): return teams.get(rid, {}).get("team_name", "")
-        hardest_id = min(sos, key=lambda rid: (-sos[rid], -opp_win_pct_sum.get(rid, 0), _team_name2(rid)))
+    # Hardest Schedule: total points scored AGAINST this team this season
+    # (their opponents' combined output) — teams whose schedule threw the
+    # most cumulative offensive firepower at them had it hardest. Tiebreak
+    # by games played against a currently top-half opponent (the previous
+    # primary metric, still a meaningful secondary signal), then name.
+    sos, _opp_win_pct_sum = compute_strength_of_schedule(pairs, standings)
+    pa_by_rid = {s["roster_id"]: s["pa"] for s in standings} if standings else {}
+    if pa_by_rid:
+        hardest_id = min(pa_by_rid, key=lambda rid: (-pa_by_rid[rid], -sos.get(rid, 0), _team_name(rid)))
         hardest_team = teams.get(hardest_id, {})
-        hardest_val = f"{sos[hardest_id]} top-half game" + ("" if sos[hardest_id] == 1 else "s")
+        hardest_val = f"{pa_by_rid[hardest_id]:.1f} pts against"
     else:
         hardest_team = {}
         hardest_val = "Pending"
     out.append({
         "name": "Hardest Schedule", "id": "splat-hardsched",
-        "description": "Most matchups against a currently top-half opponent.",
-        "detail": "Count of matchups played against a team currently in the top half of the standings. Tiebreaker 1: combined win% of every opponent faced this season (a finer-grained schedule-strength measure), highest first. Tiebreaker 2: team name, alphabetically.",
+        "description": "Most total points scored against them this season.",
+        "detail": "Sum of every opponent's weekly score against this team, all season — the higher the total, the more offensive firepower their schedule threw at them. Tiebreaker 1: matchups played against a currently top-half opponent, highest first. Tiebreaker 2: team name, alphabetically.",
         "leader": hardest_team.get("team_name", "TBD"), "owner": hardest_team.get("owner"), "value": hardest_val,
     })
 
@@ -1002,9 +1146,17 @@ def compute_stat_superlatives(league_id, teams, standings, pairs, parlay_summary
     # at generation time). For the live Firebase backend, this card renders as
     # "Loading…" and is filled in client-side once that tab's data loads —
     # see the splat-parlay id hooks in the Weekly Parlay JS loader.
-    parlay_detail = "Ranked by total hit legs across every week submitted. Tiebreaker 1: hit rate (hits / total legs graded), highest first. Tiebreaker 2: manager name, alphabetically."
+    #
+    # Hit rate is NOT used as the tiebreaker: if every manager submits a leg
+    # every week, everyone has the same number of legs graded, so rate ties
+    # in lockstep with hits and can't actually break anything. Longest hit
+    # streak this season is used instead — it's a genuinely independent
+    # measure of "who picked better," since two managers can have identical
+    # hit counts (and identical rates) while one got there in one hot run
+    # and the other scattered theirs across the season.
+    parlay_detail = "Ranked by total hit legs across every week submitted. Tiebreaker 1: longest hit streak this season (hit rate isn't used — it ties in lockstep with hits whenever everyone submits the same number of legs). Tiebreaker 2: manager name, alphabetically."
     if parlay_summary and parlay_summary["leaderboard"]:
-        top = min(parlay_summary["leaderboard"], key=lambda r: (-r["hits"], -r["rate"], r["manager"]))
+        top = min(parlay_summary["leaderboard"], key=lambda r: (-r["hits"], -r.get("best_streak", 0), r["manager"]))
         out.append({
             "name": "Best Parlay Picker", "id": "splat-parlay",
             "description": "Most successful legs submitted to the weekly parlay.",
@@ -1135,6 +1287,7 @@ def build_model():
     lg_settings = lg.get("settings") or {}
     playoff_spots = lg_settings.get("playoff_teams") or 0
     reg_season_weeks = max(0, (lg_settings.get("playoff_week_start") or 0) - 1)
+    roster_positions = lg.get("roster_positions") or []
 
     teams = build_teams(LEAGUE_ID)
     scores, pairs, outcomes, _, season_pts = weekly_results(LEAGUE_ID, MAX_WEEK)
@@ -1394,7 +1547,7 @@ def build_model():
 
     # ---- superlatives (stat-tracked ones; voted ones are static, see VOTED_SUPERLATIVES) ----
     local_parlay_summary = compute_parlay_summary(load_parlay_weeks())
-    stat_superlatives = compute_stat_superlatives(LEAGUE_ID, teams, standings, pairs, local_parlay_summary)
+    stat_superlatives = compute_stat_superlatives(LEAGUE_ID, teams, standings, pairs, local_parlay_summary, roster_positions)
 
     # ---- manager -> active roster, for the Weekly Parlay pick dropdown ----
     manager_rosters = {}
@@ -1761,13 +1914,19 @@ function updateBestParlayPickerCard(stats){
   // data loads (Firebase backend only — the local-file backend's version is
   // already baked in server-side). No-op if that card isn't on the page,
   // or there's no data yet.
+  //
+  // Hit rate is NOT used as a tiebreaker: if every manager submits a leg
+  // every week, they all have the same number of legs graded, so rate ties
+  // in lockstep with hits and can't actually differentiate anyone. Longest
+  // hit streak this season is used instead — genuinely independent of
+  // total hit count.
   var valueEl = document.getElementById('splat-parlay-value');
   var leaderEl = document.getElementById('splat-parlay-leader');
   if (!valueEl || !leaderEl || !stats || !stats.length) return;
   var top = stats.slice().sort(function(a,b){
     if (b.hits !== a.hits) return b.hits - a.hits;
-    var ra = a.hit_rate_pct == null ? -1 : a.hit_rate_pct, rb = b.hit_rate_pct == null ? -1 : b.hit_rate_pct;
-    if (rb !== ra) return rb - ra;
+    var sa = a.best_streak || 0, sb = b.best_streak || 0;
+    if (sb !== sa) return sb - sa;
     return a.manager.localeCompare(b.manager);
   })[0];
   valueEl.textContent = top.hits + ' hits (' + (top.hit_rate_pct == null ? '—' : top.hit_rate_pct + '%') + ')';
@@ -2106,6 +2265,27 @@ function pqRenderHistory(legs){
       else if (l.result === 'miss') st.misses++;
     });
   });
+  // Each manager's oldest-to-newest sequence of decided results (pending
+  // skipped), for the "longest hit streak" tiebreaker used below. Hit rate
+  // isn't used for that: if every manager submits a leg every week, they
+  // all have the same number of legs graded, so rate ties in lockstep with
+  // hits and can't actually differentiate anyone.
+  var managerSeq = {};
+  for (var wi = weeksSorted.length - 1; wi >= 0; wi--){
+    weeksSorted[wi].legs.forEach(function(l){
+      if (l.result === 'hit' || l.result === 'miss'){
+        managerSeq[l.manager] = managerSeq[l.manager] || [];
+        managerSeq[l.manager].push(l.result);
+      }
+    });
+  }
+  function bestStreak(seq){
+    var best = 0, cur = 0;
+    (seq || []).forEach(function(r){
+      if (r === 'hit'){ cur++; best = Math.max(best, cur); } else { cur = 0; }
+    });
+    return best;
+  }
   var rate = parlaysDecided ? Math.round((parlaysHit / parlaysDecided) * 100) : 0;
   heroEl.innerHTML =
     '<div class="parlay-summary-hero">' +
@@ -2118,9 +2298,10 @@ function pqRenderHistory(legs){
     var s = managerStats[m];
     var decided = s.hits + s.misses;
     s.rate = decided ? Math.round((s.hits / decided) * 1000) / 10 : null;
+    s.bestStreak = bestStreak(managerSeq[m]);
     return s;
   }).sort(function(a,b){ var ra = a.rate == null ? -1 : a.rate, rb = b.rate == null ? -1 : b.rate; return rb - ra; });
-  updateBestParlayPickerCard(statsList.map(function(s){ return {manager: s.manager, hits: s.hits, hit_rate_pct: s.rate}; }));
+  updateBestParlayPickerCard(statsList.map(function(s){ return {manager: s.manager, hits: s.hits, hit_rate_pct: s.rate, best_streak: s.bestStreak}; }));
   var maxHits = statsList.reduce(function(m,s){ return Math.max(m, s.hits); }, 0);
   var lbRows = statsList.map(function(s, i){
     var rank = i + 1, rankCls = rank <= 3 ? ' pr' + rank : '';
