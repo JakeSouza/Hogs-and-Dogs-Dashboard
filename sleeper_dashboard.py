@@ -1627,7 +1627,7 @@ h1{font-size:1.6rem;margin-bottom:4px}
   .hero-chip{font-size:12px;padding:5px 11px}
 }
 .ticker{background:#1e6fff;color:#fff;font-family:'Oswald',sans-serif;font-weight:600;font-size:12px;letter-spacing:.4px;padding:9px 0;overflow:hidden;white-space:nowrap;border-radius:10px;margin-bottom:18px}
-.ticker-track{display:inline-block;padding-left:100%;animation:ticker-scroll 38s linear infinite}
+.ticker-track{display:inline-block;padding-left:100%;animation:ticker-scroll 60s linear infinite}
 .ticker-track span{display:inline-block;padding-right:56px}
 .ticker-track span::after{content:'';display:inline-block;width:6px;height:6px;border-radius:50%;background:#ffd23f;margin:0 0 1px 56px;vertical-align:middle}
 @keyframes ticker-scroll{from{transform:translateX(0)}to{transform:translateX(-100%)}}
