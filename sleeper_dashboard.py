@@ -3025,16 +3025,36 @@ def build_ticker_html(model):
     """
     Signature Broadcast Desk element: a scrolling strip of short headline
     facts assembled from whatever real data is available this run (league
-    leader, most recent trade, most recent waiver/free-agent move, most
-    recent champion, one superlative highlight). Gracefully falls back to
-    just the leader/season line for a brand-new league with no history,
-    trades, or transactions yet, rather than showing nothing.
+    leader, longest active streak, top power ranking, most recent trade,
+    up to 3 most recent waiver/free-agent moves, most recent champion, one
+    superlative highlight). Gracefully falls back to just the leader/season
+    line for a brand-new league with no history, trades, or transactions
+    yet, rather than showing nothing.
     """
     items = []
     standings = model.get("standings") or []
     if standings:
         leader = standings[0]
         items.append(f"{leader['name'].upper()} LEADS AT {leader['wins']}-{leader['losses']}")
+
+    # Longest active streak league-wide (win or loss). Requires at least 2
+    # games so a fresh 1-0 start doesn't get billed as a "streak".
+    def _streak_len(entry):
+        s = entry.get("streak") or "-"
+        try:
+            return int(s[1:]) if s[0] in ("W", "L") else 0
+        except (ValueError, IndexError):
+            return 0
+
+    streak_candidates = [s for s in standings if _streak_len(s) >= 2]
+    if streak_candidates:
+        top_streak = max(streak_candidates, key=_streak_len)
+        kind = "WIN STREAK" if top_streak["streak"][0] == "W" else "LOSING SKID"
+        items.append(f"{top_streak['name'].upper()} ON A {_streak_len(top_streak)}-GAME {kind}")
+
+    power = model.get("power") or []
+    if power:
+        items.append(f"{power[0]['name'].upper()} TOPS THE POWER RANKINGS")
 
     trades = model.get("trade_log") or []
     if trades:
@@ -3045,13 +3065,13 @@ def build_ticker_html(model):
             got = (a.get("gets") or ["a deal"])[0]
             items.append(f"TRADE: {a['name'].upper()} ACQUIRES {got.upper()} FROM {b['name'].upper()}")
 
-    # Most recent non-trade transaction (waiver add, free-agent add, or
-    # drop). Trades are excluded here since the block above already covers
-    # them with a richer two-sided summary.
+    # Most recent non-trade transactions (waiver adds, free-agent adds, or
+    # drops) — up to 3. Trades are excluded here since the block above
+    # already covers them with a richer two-sided summary.
     activity = model.get("activity") or []
-    recent_move = next((a for a in activity if a.get("action") not in ("Traded for", "Traded away")), None)
-    if recent_move:
-        items.append(f"{recent_move['action'].upper()}: {recent_move['team'].upper()} - {recent_move['player'].upper()}")
+    recent_moves = [a for a in activity if a.get("action") not in ("Traded for", "Traded away")][:3]
+    for a in recent_moves:
+        items.append(f"{a['action'].upper()}: {a['team'].upper()} - {a['player'].upper()}")
 
     champions = (model.get("history") or {}).get("champions") or []
     if champions:
