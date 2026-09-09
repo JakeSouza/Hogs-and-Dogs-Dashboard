@@ -3025,10 +3025,10 @@ def build_ticker_html(model):
     """
     Signature Broadcast Desk element: a scrolling strip of short headline
     facts assembled from whatever real data is available this run (league
-    leader, most recent trade, most recent champion, one superlative
-    highlight). Gracefully falls back to just the leader/season line for a
-    brand-new league with no history or trades yet, rather than showing
-    nothing.
+    leader, most recent trade, most recent waiver/free-agent move, most
+    recent champion, one superlative highlight). Gracefully falls back to
+    just the leader/season line for a brand-new league with no history,
+    trades, or transactions yet, rather than showing nothing.
     """
     items = []
     standings = model.get("standings") or []
@@ -3045,6 +3045,14 @@ def build_ticker_html(model):
             got = (a.get("gets") or ["a deal"])[0]
             items.append(f"TRADE: {a['name'].upper()} ACQUIRES {got.upper()} FROM {b['name'].upper()}")
 
+    # Most recent non-trade transaction (waiver add, free-agent add, or
+    # drop). Trades are excluded here since the block above already covers
+    # them with a richer two-sided summary.
+    activity = model.get("activity") or []
+    recent_move = next((a for a in activity if a.get("action") not in ("Traded for", "Traded away")), None)
+    if recent_move:
+        items.append(f"{recent_move['action'].upper()}: {recent_move['team'].upper()} - {recent_move['player'].upper()}")
+
     champions = (model.get("history") or {}).get("champions") or []
     if champions:
         c = champions[0]
@@ -3053,7 +3061,11 @@ def build_ticker_html(model):
     superlatives = model.get("stat_superlatives") or []
     pick = next((s for s in superlatives if s.get("leader") and s["leader"] != "TBD" and s["leader"] != "Loading…"), None)
     if pick:
-        items.append(f"{pick['name'].upper()}: {pick['leader'].upper()}")
+        # The regular-season-record superlative reflects the current
+        # standings, not a decided outcome, so the ticker calls it out as
+        # the "leader" rather than the "winner" until the season ends.
+        label = "REGULAR SEASON LEADER" if pick.get("id") == "splat-regseason" else pick['name'].upper()
+        items.append(f"{label}: {pick['leader'].upper()}")
 
     if not items:
         items = [f"WEEK {model['current_week']} · {model['season']} SEASON"]
