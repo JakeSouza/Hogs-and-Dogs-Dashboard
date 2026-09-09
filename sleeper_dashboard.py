@@ -1806,6 +1806,11 @@ td{padding:9px 10px;border-bottom:1px solid #1f2740}
 .parlay-week-band{display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:12px;background:linear-gradient(135deg,#141b30 0%,#0a0d13 100%);border:1px solid #232938;border-radius:12px;padding:16px 22px;margin-bottom:18px;position:relative;overflow:hidden}
 .parlay-week-band::before{content:'';position:absolute;inset:-50%;background:radial-gradient(circle at 20% 30%,rgba(255,91,31,.14),transparent 45%),radial-gradient(circle at 80% 70%,rgba(30,111,255,.14),transparent 45%);pointer-events:none}
 .pq-week-band-title{position:relative;z-index:1;font-family:'Oswald',sans-serif;text-transform:uppercase;letter-spacing:.5px;font-size:1.1rem;font-weight:600}
+.pq-week-band-left{position:relative;z-index:1;display:flex;flex-direction:column;gap:8px}
+.pq-status-badge{display:inline-block;padding:4px 12px;border-radius:20px;font-family:'Oswald',sans-serif;font-size:.68rem;font-weight:700;text-transform:uppercase;letter-spacing:.5px;width:fit-content}
+.pq-status-none{background:rgba(138,148,168,.16);color:#8a94a8;border:1px solid rgba(138,148,168,.35)}
+.pq-status-partial{background:rgba(255,210,63,.16);color:#ffd23f;border:1px solid rgba(255,210,63,.4)}
+.pq-status-complete{background:rgba(74,222,128,.16);color:#4ade80;border:1px solid rgba(74,222,128,.4)}
 .pq-week-band-stats{position:relative;z-index:1;display:flex;gap:18px;flex-wrap:wrap}
 .pq-week-band-stat{text-align:center}
 .pq-week-band-stat .pwn{font-size:1.1rem;font-weight:400;font-family:'Archivo Black',sans-serif}
@@ -2114,6 +2119,7 @@ function pqAddPicksRow(manager, pick, result){
 function pqRenderWeekBand(season, week, filteredLegs){
   var titleEl = document.querySelector('#pqWeekBand .pq-week-band-title');
   var statsEl = document.getElementById('pqWeekBandStats');
+  var statusEl = document.getElementById('pqWeekStatus');
   if (!titleEl || !statsEl) return;
   titleEl.textContent = 'Week ' + week + ', ' + season;
   var submitted = filteredLegs.length;
@@ -2124,6 +2130,17 @@ function pqRenderWeekBand(season, week, filteredLegs){
     '<div class="pq-week-band-stat"><div class="pwn">' + submitted + '</div><div class="pwl">Submitted</div></div>' +
     '<div class="pq-week-band-stat"><div class="pwn">' + graded + ' / ' + submitted + '</div><div class="pwl">Graded</div></div>' +
     '<div class="pq-week-band-stat"><div class="pwn">' + hits + '-' + misses + '</div><div class="pwl">Hit-Miss</div></div>';
+  if (statusEl){
+    var cls, label;
+    if (submitted === 0){
+      cls = 'pq-status-none'; label = 'Not started';
+    } else if (graded < submitted){
+      cls = 'pq-status-partial'; label = 'Picks saved \u2014 needs results';
+    } else {
+      cls = 'pq-status-complete'; label = 'Complete';
+    }
+    statusEl.innerHTML = '<span class="pq-status-badge ' + cls + '">' + label + '</span>';
+  }
 }
 function pqLoadWeek(){
   var season = parseInt(document.getElementById('pqSeason').value, 10);
@@ -2742,7 +2759,10 @@ def render_parlay_firebase(model):
     <div id="pqStatus" class="section-note">Loading&hellip;</div>
 
     <div id="pqWeekBand" class="parlay-week-band">
-      <div class="pq-week-band-title">Week {model['current_week']}, {model['season']}</div>
+      <div class="pq-week-band-left">
+        <div class="pq-week-band-title">Week {model['current_week']}, {model['season']}</div>
+        <div class="pq-week-status" id="pqWeekStatus"></div>
+      </div>
       <div class="pq-week-band-stats" id="pqWeekBandStats"></div>
     </div>
 
