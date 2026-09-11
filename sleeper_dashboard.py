@@ -1604,23 +1604,37 @@ def team_cell(name, owner=None, logo=None):
 
 CSS = """
 *{box-sizing:border-box;margin:0;padding:0}
-body{font-family:'Inter',-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;background:#0a0d13;color:#f4f6fa;padding:24px}
+:root{
+  --shadow-1:0 1px 2px rgba(0,0,0,.4),inset 0 1px 0 rgba(255,255,255,.04);
+  --shadow-2:0 4px 14px rgba(0,0,0,.38),inset 0 1px 0 rgba(255,255,255,.05);
+  --shadow-3:0 16px 40px rgba(0,0,0,.5),inset 0 1px 0 rgba(255,255,255,.06);
+  --stat-pos:#4ade80;--stat-neg:#f87171;--stat-neu:#8a94a8;
+}
+body{font-family:'Inter',-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;background:#0a0d13;color:#f4f6fa;padding:24px;font-variant-numeric:tabular-nums}
 h1,h2,h3{font-family:'Archivo Black',sans-serif}
 h1{font-size:1.6rem;margin-bottom:4px}
 .subtitle{color:#8a94a8;margin-bottom:20px;font-size:.95rem}
+.stat-pos{color:var(--stat-pos)}
+.stat-neg{color:var(--stat-neg)}
 
 /* ---------- Hero / title banner ---------- */
-.hero{position:relative;overflow:hidden;border-radius:14px;border:1px solid #232938;padding:36px 32px;margin-bottom:28px;background:linear-gradient(115deg,#0a0d13 60%,#10141f 100%)}
+.hero{position:relative;overflow:hidden;border-radius:14px;border:1px solid #232938;padding:36px 32px;margin-bottom:28px;background:linear-gradient(115deg,#0a0d13 60%,#10141f 100%);box-shadow:var(--shadow-3)}
 .hero-glow{position:absolute;top:-40px;right:-40px;width:220px;height:220px;background:#ff5b1f;opacity:.14;clip-path:polygon(30% 0,100% 0,100% 70%,70% 100%,0 100%,0 30%);pointer-events:none}
-.hero-content{position:relative;z-index:1}
-.hero-eyebrow{font-family:'Oswald',sans-serif;color:#ff5b1f;font-size:12px;font-weight:600;letter-spacing:2.5px;text-transform:uppercase;margin-bottom:10px}
-.hero-title{font-family:'Archivo Black',sans-serif;text-transform:uppercase;margin:0 0 18px 0;font-size:42px;font-weight:400;letter-spacing:-1px;line-height:1.05;
-  background:linear-gradient(90deg,#ffffff 0%,#cfd8f5 55%,#ff5b1f 130%);
-  -webkit-background-clip:text;background-clip:text;color:transparent}
+.hero-content{position:relative;z-index:1;opacity:0;transform:translateY(10px);animation:hero-in .6s cubic-bezier(.22,1,.36,1) forwards}
+.hero-eyebrow{color:#8a94a8;font-size:13px;font-weight:500;margin-bottom:8px}
+.hero-title{font-family:'Archivo Black',sans-serif;text-transform:uppercase;margin:0 0 18px 0;font-size:42px;font-weight:400;letter-spacing:-1px;line-height:1.05;color:#f4f6fa}
 .hero-meta{display:flex;flex-wrap:wrap;gap:8px}
-.hero-chip{display:inline-flex;align-items:center;gap:6px;padding:7px 16px;border-radius:0;clip-path:polygon(8px 0,100% 0,100% 100%,0 100%,0 8px);font-family:'Oswald',sans-serif;font-size:13px;font-weight:600;letter-spacing:.3px;background:#181d29;border-left:3px solid #1e6fff;color:#f4f6fa}
+.hero-chip{display:inline-flex;align-items:center;gap:6px;padding:7px 16px;border-radius:0;clip-path:polygon(8px 0,100% 0,100% 100%,0 100%,0 8px);font-family:'Oswald',sans-serif;font-size:13px;font-weight:600;letter-spacing:.3px;background:#181d29;border-left:3px solid #1e6fff;color:#f4f6fa;opacity:0;animation:hero-chip-in .5s ease forwards}
 .hero-chip-muted{color:#8a94a8;font-weight:400;background:transparent;border-left-color:#232938}
 .hero-chip-est{border-left-color:#ffd23f;color:#ffd23f}
+.hero-meta .hero-chip:nth-child(1){animation-delay:.25s}
+.hero-meta .hero-chip:nth-child(2){animation-delay:.32s}
+.hero-meta .hero-chip:nth-child(3){animation-delay:.39s}
+.hero-meta .hero-chip:nth-child(4){animation-delay:.46s}
+.hero-meta .hero-chip:nth-child(5){animation-delay:.53s}
+@keyframes hero-in{from{opacity:0;transform:translateY(10px)}to{opacity:1;transform:translateY(0)}}
+@keyframes hero-chip-in{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:translateY(0)}}
+@media (prefers-reduced-motion:reduce){.hero-content,.hero-chip{animation:none;opacity:1;transform:none}}
 @media (max-width:640px){
   .hero{padding:24px 18px;border-radius:14px;margin-bottom:18px}
   .hero-title{font-size:28px}
@@ -1635,12 +1649,13 @@ h1{font-size:1.6rem;margin-bottom:4px}
 .tabs{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:18px}
 .tab{font-family:'Oswald',sans-serif;text-transform:uppercase;letter-spacing:.6px;background:#181d29;border:1px solid #232938;color:#c2c8d8;padding:9px 16px;border-radius:8px;cursor:pointer;font-size:.82rem;font-weight:600}
 .tab.active{background:#ff5b1f;color:#fff;border-color:#ff5b1f}
-.panel{display:none;background:#12161f;border:1px solid #232938;border-top:3px solid;border-image:linear-gradient(90deg,#1e6fff,#ff5b1f) 1;border-radius:12px;padding:20px}
+.panel{display:none;background:#12161f;border:1px solid #232938;border-top:3px solid;border-image:linear-gradient(90deg,#1e6fff,#ff5b1f) 1;border-radius:12px;padding:20px;box-shadow:var(--shadow-2)}
 .panel.active{display:block}
 .section-title{position:relative;padding-left:14px;font-size:1.15rem;text-transform:uppercase;letter-spacing:.5px;margin-bottom:12px;color:#fff}
 .section-title::before{content:'';position:absolute;left:0;top:3px;bottom:3px;width:4px;border-radius:0;background:linear-gradient(180deg,#1e6fff,#ff5b1f)}
 .section-note{color:#8a94a8;font-size:.85rem;margin-bottom:14px}
 table{width:100%;border-collapse:collapse;font-size:.88rem}
+thead th{position:sticky;top:0;background:#12161f;z-index:1}
 th{font-family:'Oswald',sans-serif;text-align:left;color:#8a94a8;padding:8px 10px;border-bottom:1px solid #232938;font-weight:600;font-size:.72rem;text-transform:uppercase;letter-spacing:.8px}
 td{padding:9px 10px;border-bottom:1px solid #1f2740}
 .team-cell-inner{display:flex;align-items:center;gap:10px}
@@ -1648,7 +1663,7 @@ td{padding:9px 10px;border-bottom:1px solid #1f2740}
 .team-name-main{font-weight:600;color:#f4f6fa}
 .owner-name{font-size:.78rem;color:#7a82a0}
 .matchup-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:14px}
-.matchup-card{background:#181d29;border:1px solid #232938;border-top:3px solid #1e6fff;border-radius:6px;padding:14px}
+.matchup-card{background:#181d29;border:1px solid #232938;border-top:3px solid #1e6fff;border-radius:6px;padding:14px;box-shadow:var(--shadow-1)}
 .matchup-teams{display:flex;justify-content:space-between;align-items:center;gap:8px}
 .matchup-team{text-align:center;flex:1}
 .team-record{color:#8a94a8;font-size:.8rem}
@@ -1656,7 +1671,7 @@ td{padding:9px 10px;border-bottom:1px solid #1f2740}
 .vs{color:#5a6280;font-weight:700}
 .outlook{margin-top:10px;font-size:.8rem;color:#a0a6c0;line-height:1.4}
 .rivalry-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:14px}
-.rivalry-card{background:#181d29;border:1px solid #232938;border-top:3px solid #ff5b1f;border-radius:6px;padding:14px}
+.rivalry-card{background:#181d29;border:1px solid #232938;border-top:3px solid #ff5b1f;border-radius:6px;padding:14px;box-shadow:var(--shadow-1)}
 .rivalry-meetings{color:#8a94a8;font-size:.78rem;margin-bottom:8px}
 .empty{color:#6a7090;font-style:italic;padding:14px}
 .luck-good{color:#4ade80}.luck-bad{color:#f87171}
@@ -1673,12 +1688,12 @@ td{padding:9px 10px;border-bottom:1px solid #1f2740}
 .draft-board-wrap{display:flex;flex-direction:column;gap:14px}
 .legend{display:flex;flex-wrap:wrap;gap:16px;font-size:.78rem;color:#8a94a8;font-family:'Oswald',sans-serif;letter-spacing:.3px}
 .legend .dot{display:inline-block;width:10px;height:10px;border-radius:50%;margin-right:6px;vertical-align:middle}
-.draft-grid{overflow-x:auto}
+.draft-grid{overflow-x:auto;overflow-y:visible}
 .draft-grid table.draft-board{font-size:.78rem;border-collapse:separate;border-spacing:6px}
 .draft-grid .draft-board th{font-family:'Oswald',sans-serif;text-transform:uppercase;letter-spacing:.6px;white-space:nowrap;padding:4px 8px}
 .draft-grid .draft-board th.round-label,.draft-grid .draft-board td.round-label{text-align:center;color:#8a94a8;font-family:'JetBrains Mono',monospace;font-weight:700;width:30px}
 .draft-grid .draft-board td{padding:0;vertical-align:top;min-width:130px}
-.draft-cell{background:#181d29;border:1px solid #232938;border-radius:6px;padding:8px 10px;min-height:64px}
+.draft-cell{background:#181d29;border:1px solid #232938;border-radius:6px;padding:8px 10px;min-height:64px;box-shadow:var(--shadow-1)}
 .draft-cell .player{font-weight:600;font-size:.82rem;color:#f4f6fa;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:150px}
 .draft-cell .drafted-by{font-size:.7rem;color:#8a94a8;margin-top:2px}
 .draft-cell .rank-move{font-family:'JetBrains Mono',monospace;font-size:.68rem;color:#c2c8d8;margin-top:5px}
@@ -1686,7 +1701,7 @@ td{padding:9px 10px;border-bottom:1px solid #1f2740}
 
 /* ---------- Trophy Case ---------- */
 .trophy-wall{display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:14px}
-.trophy-card{background:#181d29;border:1px solid #232938;border-radius:10px;padding:18px 16px;text-align:center}
+.trophy-card{background:#181d29;border:1px solid #232938;border-radius:10px;padding:18px 16px;text-align:center;box-shadow:var(--shadow-1)}
 .trophy-year{color:#ffd23f;font-weight:800;font-size:.82rem;letter-spacing:.5px;margin-bottom:6px}
 .trophy-icon{font-size:1.6rem;margin-bottom:8px}
 .trophy-card .team-name-main{font-size:.88rem}
@@ -1696,7 +1711,7 @@ td{padding:9px 10px;border-bottom:1px solid #1f2740}
 
 /* ---------- League Records Book ---------- */
 .record-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:14px}
-.record-card{background:#181d29;border:1px solid #232938;border-radius:10px;padding:16px;position:relative}
+.record-card{background:#181d29;border:1px solid #232938;border-radius:10px;padding:16px;position:relative;box-shadow:var(--shadow-1)}
 .record-label{color:#8a94a8;font-size:.75rem;text-transform:uppercase;letter-spacing:.5px;margin-bottom:8px;display:flex;align-items:center;justify-content:space-between;gap:8px}
 .info-btn{background:none;border:1px solid #3a4256;color:#8a94a8;width:16px;height:16px;border-radius:50%;font-size:.65rem;font-style:italic;font-family:Georgia,serif;line-height:1;cursor:pointer;padding:0;flex-shrink:0;display:inline-flex;align-items:center;justify-content:center}
 .info-btn:hover{border-color:#1e6fff;color:#1e6fff}
@@ -1784,7 +1799,7 @@ td{padding:9px 10px;border-bottom:1px solid #1f2740}
 .parlay-lb-record{color:#8a94a8;font-size:.72rem;white-space:nowrap}
 
 /* Weekly breakdown as "parlay slip" ticket cards */
-.parlay-slip{background:#12161f;border:1px solid #232938;border-radius:12px;overflow:hidden;margin-bottom:14px}
+.parlay-slip{background:#12161f;border:1px solid #232938;border-radius:12px;overflow:hidden;margin-bottom:14px;box-shadow:var(--shadow-1)}
 .parlay-slip-head{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:12px 16px;border-bottom:1px dashed #232938}
 .parlay-slip-title{font-weight:600;font-family:'Oswald',sans-serif;text-transform:uppercase;letter-spacing:.4px;font-size:.85rem}
 .parlay-slip-status{font-size:.68rem;font-weight:800;letter-spacing:.5px;text-transform:uppercase;padding:4px 12px;border-radius:20px;white-space:nowrap}
@@ -1817,12 +1832,12 @@ td{padding:9px 10px;border-bottom:1px solid #1f2740}
 .pq-week-band-stat .pwl{font-size:.65rem;color:#8a94a8;text-transform:uppercase;letter-spacing:.5px}
 
 /* ---------- Weekly Parlay: picks table + team stats ---------- */
-.parlay-card{background:#12161f;border:1px solid #232938;border-radius:12px;padding:20px;margin-bottom:8px}
+.parlay-card{background:#12161f;border:1px solid #232938;border-radius:12px;padding:20px;margin-bottom:8px;box-shadow:var(--shadow-2)}
 .parlay-week-selector{display:flex;gap:14px;align-items:center;margin-bottom:16px;flex-wrap:wrap}
 .parlay-week-selector label{display:flex;align-items:center;gap:6px;font-size:.82rem;color:#8a94a8}
 .parlay-week-selector input{background:#0a0d13;border:1px solid #232938;color:#f4f6fa;padding:8px 11px;border-radius:7px;width:90px;font-size:.85rem}
 .parlay-week-selector input:focus{outline:none;border-color:#1e6fff}
-.parlay-table-wrap{overflow-x:auto;margin-bottom:6px}
+.parlay-table-wrap{overflow-x:auto;overflow-y:visible;margin-bottom:6px}
 .parlay-table{width:100%;border-collapse:collapse;font-size:.88rem}
 .parlay-table th{text-align:left;color:#8a94a8;padding:8px 10px;border-bottom:1px solid #232938;font-weight:600;font-size:.72rem;text-transform:uppercase;letter-spacing:.5px}
 .parlay-table td{padding:7px 8px;border-bottom:1px solid #181d29;vertical-align:middle;border-left:3px solid transparent;transition:background-color .15s ease}
@@ -1837,7 +1852,7 @@ td{padding:9px 10px;border-bottom:1px solid #1f2740}
 
 /* Team Stats as cards instead of a plain table */
 .pq-stat-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:14px}
-.pq-stat-card{background:#12161f;border:1px solid #232938;border-radius:12px;padding:16px 18px;position:relative;overflow:hidden}
+.pq-stat-card{background:#12161f;border:1px solid #232938;border-radius:12px;padding:16px 18px;position:relative;overflow:hidden;box-shadow:var(--shadow-1)}
 .pq-stat-card.pq-stat-hit-streak{border-color:rgba(74,222,128,.4)}
 .pq-stat-card.pq-stat-miss-streak{border-color:rgba(248,113,113,.4)}
 .pq-stat-name{font-family:'Oswald',sans-serif;text-transform:uppercase;letter-spacing:.4px;font-weight:600;font-size:.92rem;margin-bottom:10px}
@@ -1864,7 +1879,7 @@ td{padding:9px 10px;border-bottom:1px solid #1f2740}
   .subtab{padding:5px 10px;font-size:.7rem}
   /* Any table too wide for the screen scrolls within its own panel
      instead of breaking the page layout. */
-  .panel,.subpanel,.tenure-team-panel{overflow-x:auto}
+  .panel,.subpanel,.tenure-team-panel{overflow-x:auto;overflow-y:visible}
   table{font-size:.78rem}
   th,td{padding:6px 7px}
   .logo{width:24px;height:24px}
@@ -1874,8 +1889,22 @@ td{padding:9px 10px;border-bottom:1px solid #1f2740}
 """
 
 JS = """
-function showTab(id,btn){document.querySelectorAll('.tab').forEach(t=>t.classList.remove('active'));document.querySelectorAll('.panel').forEach(p=>p.classList.remove('active'));btn.classList.add('active');document.getElementById(id).classList.add('active');}
-function showSubTab(id,btn){btn.parentNode.querySelectorAll('.subtab').forEach(t=>t.classList.remove('active'));btn.parentNode.parentNode.querySelectorAll('.subpanel').forEach(p=>p.classList.remove('active'));btn.classList.add('active');document.getElementById(id).classList.add('active');}
+function switchTab(id,btn){document.querySelectorAll('.tab').forEach(t=>t.classList.remove('active'));document.querySelectorAll('.panel').forEach(p=>p.classList.remove('active'));btn.classList.add('active');document.getElementById(id).classList.add('active');}
+function showTab(id,btn){
+  if(document.startViewTransition && !window.matchMedia('(prefers-reduced-motion: reduce)').matches){
+    document.startViewTransition(()=>switchTab(id,btn));
+  }else{
+    switchTab(id,btn);
+  }
+}
+function switchSubTab(id,btn){btn.parentNode.querySelectorAll('.subtab').forEach(t=>t.classList.remove('active'));btn.parentNode.parentNode.querySelectorAll('.subpanel').forEach(p=>p.classList.remove('active'));btn.classList.add('active');document.getElementById(id).classList.add('active');}
+function showSubTab(id,btn){
+  if(document.startViewTransition && !window.matchMedia('(prefers-reduced-motion: reduce)').matches){
+    document.startViewTransition(()=>switchSubTab(id,btn));
+  }else{
+    switchSubTab(id,btn);
+  }
+}
 function showTenureTeam(team){document.querySelectorAll('.tenure-team-panel').forEach(function(p){p.classList.toggle('active', p.getAttribute('data-team') === team);});}
 function toggleInfo(id){
   var panel = document.getElementById(id);
@@ -2379,7 +2408,10 @@ def standings_table(rows, with_pa=True, with_streak=True):
         rec = f"{r['wins']}-{r['losses']}" + (f"-{r['ties']}" if r.get('ties') else "")
         cells = f"<td>{r['rank']}</td><td class='team-cell'>{team_cell(r['name'], r.get('owner'), r.get('logo'))}</td><td>{rec}</td><td>{r['pf']:.1f}</td>"
         if with_pa: cells += f"<td>{r['pa']:.1f}</td>"
-        if with_streak: cells += f"<td>{esc(r.get('streak','-'))}</td>"
+        if with_streak:
+            streak = esc(r.get('streak', '-'))
+            streak_cls = "stat-pos" if streak.startswith("W") else ("stat-neg" if streak.startswith("L") else "")
+            cells += f"<td class='{streak_cls}'>{streak}</td>"
         body.append(f"<tr>{cells}</tr>")
     return f"<table><thead>{head}</thead><tbody>{''.join(body)}</tbody></table>"
 
