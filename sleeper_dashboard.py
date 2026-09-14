@@ -1299,14 +1299,27 @@ def build_model():
     standings = []
     for i, t in enumerate(ordered, 1):
         sl, sn = streak_from_outcomes(outcomes.get(t["roster_id"], []))
+        games_played = t["wins"] + t["losses"] + t["ties"]
+        # Streaks are derived by replaying raw weekly matchup scores, which
+        # is a separate data path from Sleeper's own win/loss record. If
+        # the official record shows no games played yet, never show a
+        # streak even if the replay logic thinks it found one (e.g. from
+        # preseason placeholder scores) — the record is the source of truth.
+        streak = f"{sl}{sn}" if (sn and games_played > 0) else "-"
         standings.append({
             "rank": i, "roster_id": t["roster_id"], "name": t["team_name"], "owner": t.get("owner"),
             "wins": t["wins"], "losses": t["losses"], "ties": t["ties"],
-            "pf": t["fpts"], "pa": t["fpts_against"], "streak": f"{sl}{sn}" if sn else "-",
+            "pf": t["fpts"], "pa": t["fpts_against"], "streak": streak,
             "logo": t.get("avatar"),
         })
 
-    # ---- matchups (current week) ----
+    # ---- matchups (current week): previews vs. live/actual scores ----
+    # Kept as two distinct things: the preview always reflects the
+    # pre-game expectation (season-average scoring), while the "this
+    # week's scores" section reflects whatever Sleeper is currently
+    # reporting as each team's live/actual points (None until the games
+    # start). Blending the two into one number made a live score look
+    # like a "projection" and vice versa.
     matchups = []
     try:
         mu = api(f"/league/{LEAGUE_ID}/matchups/{current_week}") or []
@@ -1317,7 +1330,7 @@ def build_model():
         pts = t.get("custom_points")
         if pts is None: pts = t.get("points")
         by_matchup.setdefault(t.get("matchup_id"), []).append((t.get("roster_id"), float(pts) if pts is not None else None))
-    # season averages for outlook
+    # season averages for the preview projection
     avg_pts = {}
     for rid, wk in scores.items():
         vals = [v for v in wk.values()]
@@ -1327,16 +1340,18 @@ def build_model():
         (ra, pa), (rb, pb) = lst
         ta, tb = teams.get(ra, {}), teams.get(rb, {})
         rec = lambda x: f"{x.get('wins',0)}-{x.get('losses',0)}" + (f"-{x.get('ties',0)}" if x.get('ties') else "")
-        # favorite by season average (or points if live)
-        fav_a = (pa if pa is not None else avg_pts.get(ra, 0)) >= (pb if pb is not None else avg_pts.get(rb, 0))
+        proj_a, proj_b = avg_pts.get(ra, 0), avg_pts.get(rb, 0)
+        fav_a = proj_a >= proj_b
         fav, dog = (ta, tb) if fav_a else (tb, ta)
-        fp = pa if pa is not None else avg_pts.get(ra, 0)
-        dp = pb if pb is not None else avg_pts.get(rb, 0)
-        gap = round(abs(fp - dp), 1)
+        gap = round(abs(proj_a - proj_b), 1)
+        live_started = pa is not None or pb is not None
         matchups.append({
-            "away": {"name": ta.get("team_name", "TBD"), "record": rec(ta), "proj": (round(pa, 1) if pa is not None else avg_pts.get(ra, 0))},
-            "home": {"name": tb.get("team_name", "TBD"), "record": rec(tb), "proj": (round(pb, 1) if pb is not None else avg_pts.get(rb, 0))},
+            "away": {"name": ta.get("team_name", "TBD"), "record": rec(ta), "proj": round(proj_a, 1),
+                      "live": (round(pa, 1) if pa is not None else 0.0)},
+            "home": {"name": tb.get("team_name", "TBD"), "record": rec(tb), "proj": round(proj_b, 1),
+                      "live": (round(pb, 1) if pb is not None else 0.0)},
             "outlook": matchup_outlook(fav.get("team_name", "TBD"), dog.get("team_name", "TBD"), gap),
+            "live_started": live_started,
         })
 
     # ---- power rankings ----
@@ -2491,19 +2506,50 @@ def render_standings_section(model):
 
 
 
+def render_matchup_previews(mup):
+    if not mup:
+        return "<p class='empty'>No matchup data available for this week yet.</p>"
+    cards = []
+    for m in mup:
+        cards.append(f"""<div class='matchup-card'><div class='matchup-teams'>
+          <div class='matchup-team'><div class='team-name-main'>{esc(m['away']['name'])}</div><div class='team-record'>{esc(m['away']['record'])}</div><div class='proj-score'>{m['away']['proj']:.1f}</div></div>
+          <div class='vs'>@</div>
+          <div class='matchup-team'><div class='team-name-main'>{esc(m['home']['name'])}</div><div class='team-record'>{esc(m['home']['record'])}</div><div class='proj-score'>{m['home']['proj']:.1f}</div></div>
+          </div><p class='outlook'>{esc(m['outlook'])}</p></div>""")
+    return f"<p class='section-note'>Pre-game expectations based on each team's season-long scoring average.</p><div class='matchup-grid'>{''.join(cards)}</div>"
+
+
+def render_weekly_scores(mup):
+    if not mup:
+        return "<p class='empty'>No matchup data available for this week yet.</p>"
+    if not any(m["live_started"] for m in mup):
+        return "<p class='empty'>This week's games haven't started yet — check back once kickoff hits.</p>"
+    cards = []
+    for m in mup:
+        if not m["live_started"]:
+            cards.append(f"""<div class='matchup-card'><div class='matchup-teams'>
+              <div class='matchup-team'><div class='team-name-main'>{esc(m['away']['name'])}</div><div class='team-record'>{esc(m['away']['record'])}</div></div>
+              <div class='vs'>@</div>
+              <div class='matchup-team'><div class='team-name-main'>{esc(m['home']['name'])}</div><div class='team-record'>{esc(m['home']['record'])}</div></div>
+              </div><p class='outlook'>Not yet started</p></div>""")
+            continue
+        away_ahead = m['away']['live'] > m['home']['live']
+        home_ahead = m['home']['live'] > m['away']['live']
+        cards.append(f"""<div class='matchup-card'><div class='matchup-teams'>
+          <div class='matchup-team'><div class='team-name-main'>{esc(m['away']['name'])}</div><div class='team-record'>{esc(m['away']['record'])}</div><div class='proj-score{" stat-pos" if away_ahead else ""}'>{m['away']['live']:.1f}</div></div>
+          <div class='vs'>@</div>
+          <div class='matchup-team'><div class='team-name-main'>{esc(m['home']['name'])}</div><div class='team-record'>{esc(m['home']['record'])}</div><div class='proj-score{" stat-pos" if home_ahead else ""}'>{m['home']['live']:.1f}</div></div>
+          </div></div>""")
+    return f"<div class='matchup-grid'>{''.join(cards)}</div>"
+
+
 def render_matchups(model):
     mup = model['matchups']
-    if not mup:
-        cards_html = "<p class='empty'>No matchup data available for this week yet.</p>"
-    else:
-        cards = []
-        for m in mup:
-            cards.append(f"""<div class='matchup-card'><div class='matchup-teams'>
-              <div class='matchup-team'><div class='team-name-main'>{esc(m['away']['name'])}</div><div class='team-record'>{esc(m['away']['record'])}</div><div class='proj-score'>{m['away']['proj']:.1f}</div></div>
-              <div class='vs'>@</div>
-              <div class='matchup-team'><div class='team-name-main'>{esc(m['home']['name'])}</div><div class='team-record'>{esc(m['home']['record'])}</div><div class='proj-score'>{m['home']['proj']:.1f}</div></div>
-              </div><p class='outlook'>{esc(m['outlook'])}</p></div>""")
-        cards_html = f"<div class='matchup-grid'>{''.join(cards)}</div>"
+    sub_nav = "<button class='subtab active' onclick=\"showSubTab('mu-preview',this)\">Matchup Previews</button>" \
+              "<button class='subtab' onclick=\"showSubTab('mu-scores',this)\">This Week's Scores</button>"
+    cards_html = (f"<div class='subtabs'>{sub_nav}</div>"
+                  f"<div id='mu-preview' class='subpanel active'>{render_matchup_previews(mup)}</div>"
+                  f"<div id='mu-scores' class='subpanel'>{render_weekly_scores(mup)}</div>")
 
     teams_sorted = sorted(model['standings'], key=lambda s: s['name'])
     if len(teams_sorted) < 2:
