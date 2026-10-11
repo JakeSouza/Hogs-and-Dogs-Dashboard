@@ -785,8 +785,8 @@ def load_parlay_weeks():
         ...
       ]
 
-    "result" is "hit", "miss", or "pending" (omit/leave pending before the
-    week's games finish). A missing or malformed file is treated as "no
+    "result" is "hit", "miss", "push" (a neutral, voided leg), or "pending"
+    (omit/leave pending before the week's games finish). A missing or malformed file is treated as "no
     data yet" rather than an error — the tab just shows a placeholder with
     the expected format until the file exists.
     """
@@ -804,15 +804,20 @@ def compute_parlay_summary(weeks):
     if not weeks:
         return None
     weekly, manager_stats = [], {}
-    manager_decided_seq = {}  # manager -> ordered list of 'hit'/'miss' results, season/week order, pending skipped
+    manager_decided_seq = {}  # manager -> ordered list of 'hit'/'miss' results, season/week order; pending and push skipped (neutral)
     parlays_hit = parlays_decided = 0
     for wk in sorted(weeks, key=lambda w: (w.get("season", 0), w.get("week", 0))):
         legs = wk.get("legs") or []
         results = [l.get("result") for l in legs]
-        if results and all(r == "hit" for r in results):
-            outcome = "hit"
-        elif any(r == "miss" for r in results):
+        # A pushed leg is voided: any miss -> miss; every NON-push leg hit -> hit;
+        # every leg pushed -> push; otherwise still pending.
+        live = [r for r in results if r != "push"]
+        if any(r == "miss" for r in results):
             outcome = "miss"
+        elif live and all(r == "hit" for r in live):
+            outcome = "hit"
+        elif results and not live:
+            outcome = "push"
         else:
             outcome = "pending"
         if outcome in ("hit", "miss"):
@@ -821,10 +826,11 @@ def compute_parlay_summary(weeks):
                 parlays_hit += 1
         for l in legs:
             mgr = l.get("manager", "Unknown")
-            st = manager_stats.setdefault(mgr, {"hits": 0, "misses": 0, "pending": 0})
+            st = manager_stats.setdefault(mgr, {"hits": 0, "misses": 0, "pushes": 0, "pending": 0})
             r = l.get("result")
             if r == "hit": st["hits"] += 1
             elif r == "miss": st["misses"] += 1
+            elif r == "push": st["pushes"] += 1
             else: st["pending"] += 1
             if r in ("hit", "miss"):
                 manager_decided_seq.setdefault(mgr, []).append(r)
@@ -849,7 +855,7 @@ def compute_parlay_summary(weeks):
 
     leaderboard = []
     for mgr, st in manager_stats.items():
-        decided = st["hits"] + st["misses"]
+        decided = st["hits"] + st["misses"]  # pushes are neutral: not in the hit-rate denominator
         rate = (st["hits"] / decided * 100) if decided else 0
         best_streak = _best_streak(manager_decided_seq.get(mgr, []))
         leaderboard.append({"manager": mgr, **st, "rate": round(rate, 1), "decided": decided, "best_streak": best_streak})
@@ -1821,12 +1827,14 @@ td{padding:9px 10px;border-bottom:1px solid #1f2740}
 .parlay-slip-status.st-hit{background:rgba(74,222,128,.18);color:#4ade80}
 .parlay-slip-status.st-miss{background:rgba(248,113,113,.18);color:#f87171}
 .parlay-slip-status.st-pending{background:rgba(30,111,255,.18);color:#1e6fff}
+.parlay-slip-status.st-push{background:rgba(255,210,63,.18);color:#ffd23f}
 .parlay-leg{display:flex;align-items:center;gap:12px;padding:9px 16px}
 .parlay-leg:not(:last-child){border-bottom:1px solid #181d29}
 .parlay-leg-icon{width:22px;height:22px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:.7rem;flex-shrink:0;font-weight:800}
 .parlay-leg-icon.ic-hit{background:rgba(74,222,128,.18);color:#4ade80}
 .parlay-leg-icon.ic-miss{background:rgba(248,113,113,.18);color:#f87171}
 .parlay-leg-icon.ic-pending{background:rgba(138,148,168,.18);color:#8a94a8}
+.parlay-leg-icon.ic-push{background:rgba(255,210,63,.18);color:#ffd23f}
 .parlay-leg-body{flex:1;min-width:0}
 .parlay-leg-manager{font-size:.68rem;color:#8a94a8;text-transform:uppercase;letter-spacing:.4px}
 .parlay-leg-pick{font-weight:600;font-size:.9rem}
@@ -1859,11 +1867,13 @@ td{padding:9px 10px;border-bottom:1px solid #1f2740}
 .parlay-table td:first-child{border-left:3px solid transparent}
 .parlay-table tr.pq-row-hit td:first-child{border-left-color:#4ade80;background:rgba(74,222,128,.05)}
 .parlay-table tr.pq-row-miss td:first-child{border-left-color:#f87171;background:rgba(248,113,113,.05)}
-.parlay-table tr.pq-row-hit td,.parlay-table tr.pq-row-miss td{background:inherit}
+.parlay-table tr.pq-row-push td:first-child{border-left-color:#ffd23f;background:rgba(255,210,63,.05)}
+.parlay-table tr.pq-row-hit td,.parlay-table tr.pq-row-miss td,.parlay-table tr.pq-row-push td{background:inherit}
 .parlay-table td select{width:100%;min-width:120px;background:#0a0d13;border:1px solid #232938;color:#f4f6fa;padding:7px 9px;border-radius:7px;font-size:.85rem}
 .parlay-table td select:focus{outline:none;border-color:#1e6fff}
 .parlay-table td select.pq-row-result option[value="hit"]{color:#4ade80}
 .parlay-table td select.pq-row-result option[value="miss"]{color:#f87171}
+.parlay-table td select.pq-row-result option[value="push"]{color:#ffd23f}
 
 /* Team Stats as cards instead of a plain table */
 .pq-stat-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:14px}
@@ -2036,7 +2046,7 @@ function addParlayLegRow(manager, pick, result){
   var mgrOpts = '<option value="">Select manager…</option>' + managers.map(function(m){
     return '<option value="' + escHtml(m) + '"' + (m === manager ? ' selected' : '') + '>' + escHtml(m) + '</option>';
   }).join('');
-  var resultOpts = ['pending','hit','miss'].map(function(r){
+  var resultOpts = ['pending','hit','miss','push'].map(function(r){
     return "<option value='"+r+"'"+(r===(result||'pending')?' selected':'')+">"+r+"</option>";
   }).join('');
   row.innerHTML =
@@ -2119,7 +2129,7 @@ function downloadParlayJSON(){
 if (document.getElementById('parlayLegRows')) { loadParlayWeek(); }
 
 /* ---------- Weekly Parlay (Firebase Firestore-backed live version) ---------- */
-var PQ_ICONS = { hit: ['&#10003;', 'ic-hit'], miss: ['&#10007;', 'ic-miss'], pending: ['&#8226;', 'ic-pending'] };
+var PQ_ICONS = { hit: ['&#10003;', 'ic-hit'], miss: ['&#10007;', 'ic-miss'], push: ['&#8211;', 'ic-push'], pending: ['&#8226;', 'ic-pending'] };
 function pqIcon(result){ return PQ_ICONS[result] || PQ_ICONS.pending; }
 function pqSlug(s){ return String(s || '').toLowerCase().trim().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, ''); }
 function pqDb(){ return firebase.firestore(); }
@@ -2149,9 +2159,10 @@ function pqTeamOptionsHtml(selected){
   }).join('');
 }
 function pqApplyRowTint(tr, resultVal){
-  tr.classList.remove('pq-row-hit', 'pq-row-miss');
+  tr.classList.remove('pq-row-hit', 'pq-row-miss', 'pq-row-push');
   if (resultVal === 'hit') tr.classList.add('pq-row-hit');
   else if (resultVal === 'miss') tr.classList.add('pq-row-miss');
+  else if (resultVal === 'push') tr.classList.add('pq-row-push');
 }
 function pqAddPicksRow(manager, pick, result){
   var tbody = document.getElementById('pqPicksBody');
@@ -2165,6 +2176,7 @@ function pqAddPicksRow(manager, pick, result){
       '<option value="pending"' + (resultVal === 'pending' ? ' selected' : '') + '>TBD</option>' +
       '<option value="hit"' + (resultVal === 'hit' ? ' selected' : '') + '>Hit</option>' +
       '<option value="miss"' + (resultVal === 'miss' ? ' selected' : '') + '>Miss</option>' +
+      '<option value="push"' + (resultVal === 'push' ? ' selected' : '') + '>Push</option>' +
     '</select></td>' +
     '<td><button type="button" class="btn-remove pq-row-remove">&times;</button></td>';
   tbody.appendChild(tr);
@@ -2186,11 +2198,12 @@ function pqRenderWeekBand(season, week, filteredLegs){
   var submitted = filteredLegs.length;
   var hits = filteredLegs.filter(function(l){ return l.result === 'hit'; }).length;
   var misses = filteredLegs.filter(function(l){ return l.result === 'miss'; }).length;
-  var graded = hits + misses;
+  var pushes = filteredLegs.filter(function(l){ return l.result === 'push'; }).length;
+  var graded = hits + misses + pushes;
   statsEl.innerHTML =
     '<div class="pq-week-band-stat"><div class="pwn">' + submitted + '</div><div class="pwl">Submitted</div></div>' +
     '<div class="pq-week-band-stat"><div class="pwn">' + graded + ' / ' + submitted + '</div><div class="pwl">Graded</div></div>' +
-    '<div class="pq-week-band-stat"><div class="pwn">' + hits + '-' + misses + '</div><div class="pwl">Hit-Miss</div></div>';
+    '<div class="pq-week-band-stat"><div class="pwn">' + hits + '-' + misses + '-' + pushes + '</div><div class="pwl">Hit-Miss-Push</div></div>';
   if (statusEl){
     var cls, label;
     if (submitted === 0){
@@ -2275,13 +2288,15 @@ function pqRenderTeamStats(allLegs){
     var legs = (byManager[m] || []).slice().sort(function(a,b){ return a.week - b.week; });
     var hits = legs.filter(function(l){ return l.result === 'hit'; }).length;
     var misses = legs.filter(function(l){ return l.result === 'miss'; }).length;
+    var pushes = legs.filter(function(l){ return l.result === 'push'; }).length;
+    // Pushes are neutral: left out of `decided`, so they neither extend nor break a streak.
     var decided = legs.filter(function(l){ return l.result === 'hit' || l.result === 'miss'; });
     var streak = pqComputeStreak(decided);
     var pickCounts = {};
     legs.forEach(function(l){ pickCounts[l.pick] = (pickCounts[l.pick] || 0) + 1; });
     var favPlayer = null, favCount = 0;
     Object.keys(pickCounts).forEach(function(p){ if (pickCounts[p] > favCount){ favCount = pickCounts[p]; favPlayer = p; } });
-    return {manager: m, hits: hits, misses: misses, streak: streak, favPlayer: favPlayer, favCount: favCount};
+    return {manager: m, hits: hits, misses: misses, pushes: pushes, streak: streak, favPlayer: favPlayer, favCount: favCount};
   });
   var rowsHtml = rows
     .slice()
@@ -2292,7 +2307,7 @@ function pqRenderTeamStats(allLegs){
       var cardCls = r.streak.length >= 2 && r.streak.type === 'hit' ? ' pq-stat-hit-streak' : (r.streak.length >= 2 && r.streak.type === 'miss' ? ' pq-stat-miss-streak' : '');
       return '<div class="pq-stat-card' + cardCls + '">' +
         '<div class="pq-stat-name">' + escHtml(r.manager) + '</div>' +
-        '<div class="pq-stat-row"><span class="pq-stat-label">Record</span><span class="pq-stat-record">' + r.hits + '-' + r.misses + '</span></div>' +
+        '<div class="pq-stat-row"><span class="pq-stat-label">Record</span><span class="pq-stat-record" title="Hits-Misses-Pushes">' + r.hits + '-' + r.misses + '-' + r.pushes + '</span></div>' +
         '<div class="pq-stat-row"><span class="pq-stat-label">Streak</span><span class="parlay-slip-status ' + streakCls + '">' + streakLabel + '</span></div>' +
         '<div class="pq-stat-fav">' + (r.favPlayer ? '&#11088; ' + escHtml(r.favPlayer) + ' <span class="pq-pos">(' + r.favCount + 'x)</span>' : 'No picks yet') + '</div>' +
         '</div>';
@@ -2334,13 +2349,18 @@ function pqRenderHistory(legs){
   var managerStats = {};
   weeksSorted.forEach(function(w){
     var results = w.legs.map(function(l){ return l.result; });
-    w.outcome = results.length && results.every(function(r){ return r === 'hit'; }) ? 'hit'
-      : (results.some(function(r){ return r === 'miss'; }) ? 'miss' : 'pending');
-    if (w.outcome !== 'pending'){ parlaysDecided++; if (w.outcome === 'hit') parlaysHit++; }
+    // A pushed leg is voided: the week is a miss if any leg missed, a hit if every
+    // NON-push leg hit, a push if every leg pushed, otherwise still pending.
+    var live = results.filter(function(r){ return r !== 'push'; });
+    w.outcome = results.some(function(r){ return r === 'miss'; }) ? 'miss'
+      : (live.length && live.every(function(r){ return r === 'hit'; }) ? 'hit'
+      : (results.length && !live.length ? 'push' : 'pending'));
+    if (w.outcome === 'hit' || w.outcome === 'miss'){ parlaysDecided++; if (w.outcome === 'hit') parlaysHit++; }
     w.legs.forEach(function(l){
-      var st = managerStats[l.manager] = managerStats[l.manager] || {manager: l.manager, hits: 0, misses: 0};
+      var st = managerStats[l.manager] = managerStats[l.manager] || {manager: l.manager, hits: 0, misses: 0, pushes: 0};
       if (l.result === 'hit') st.hits++;
       else if (l.result === 'miss') st.misses++;
+      else if (l.result === 'push') st.pushes++;
     });
   });
   // Each manager's oldest-to-newest sequence of decided results (pending
@@ -2387,7 +2407,7 @@ function pqRenderHistory(legs){
     return '<div class="parlay-lb-row"><div class="parlay-lb-rank' + rankCls + '">' + rank + '</div>' +
       '<div><div class="parlay-lb-name">' + escHtml(s.manager) + '</div><div class="parlay-lb-bar-track"><div class="parlay-lb-bar-fill" style="width:' + barPct + '%"></div></div></div>' +
       '<div class="parlay-lb-right"><div class="parlay-lb-rate">' + (s.rate == null ? '—' : s.rate + '%') + '</div>' +
-      '<div class="parlay-lb-record">' + s.hits + '-' + s.misses + '</div></div></div>';
+      '<div class="parlay-lb-record" title="Hits-Misses-Pushes">' + s.hits + '-' + s.misses + '-' + s.pushes + '</div></div></div>';
   }).join('');
   summaryEl.innerHTML = '<h3 class="playoff-col-title" style="margin:18px 0 10px">Leg Leaderboard</h3><div class="parlay-leaderboard">' + lbRows + '</div>';
 
@@ -2897,7 +2917,7 @@ def render_parlay_firebase(model):
 
 
 def _parlay_result_icon(result):
-    return {"hit": ("&#10003;", "ic-hit"), "miss": ("&#10007;", "ic-miss")}.get(result, ("&#8226;", "ic-pending"))
+    return {"hit": ("&#10003;", "ic-hit"), "miss": ("&#10007;", "ic-miss"), "push": ("&#8211;", "ic-push")}.get(result, ("&#8226;", "ic-pending"))
 
 
 def render_parlay_local(weeks, model):
@@ -2934,7 +2954,7 @@ def render_parlay_local(weeks, model):
               <div class="parlay-lb-rank{rank_cls}">{i}</div>
               <div><div class="parlay-lb-name">{esc(r['manager'])}</div>
                 <div class="parlay-lb-bar-track"><div class="parlay-lb-bar-fill" style="width:{bar_pct}%"></div></div></div>
-              <div class="parlay-lb-right"><div class="parlay-lb-rate">{r['rate']}%</div><div class="parlay-lb-record">{r['hits']}-{r['misses']}</div></div>
+              <div class="parlay-lb-right"><div class="parlay-lb-rate">{r['rate']}%</div><div class="parlay-lb-record" title="Hits-Misses-Pushes">{r['hits']}-{r['misses']}-{r['pushes']}</div></div>
             </div>""")
         lb_html = (f"<h3 class='playoff-col-title' style='margin:18px 0 10px'>Leg Leaderboard</h3>"
                    f"<div class='parlay-leaderboard'>{''.join(lb_rows)}</div>")
