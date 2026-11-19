@@ -805,12 +805,14 @@ def compute_parlay_summary(weeks):
         return None
     weekly, manager_stats = [], {}
     manager_decided_seq = {}  # manager -> ordered list of 'hit'/'miss' results, season/week order; pending and push skipped (neutral)
-    parlays_hit = parlays_decided = 0
+    totals = {"hits": 0, "misses": 0, "pushes": 0, "pending": 0}
     for wk in sorted(weeks, key=lambda w: (w.get("season", 0), w.get("week", 0))):
         legs = wk.get("legs") or []
         results = [l.get("result") for l in legs]
         # A pushed leg is voided: any miss -> miss; every NON-push leg hit -> hit;
-        # every leg pushed -> push; otherwise still pending.
+        # every leg pushed -> push; otherwise still pending. (Kept per-week for
+        # the "parlay slip" outcome badges; the season-long record is now tracked
+        # as combined leg results, not perfect weeks.)
         live = [r for r in results if r != "push"]
         if any(r == "miss" for r in results):
             outcome = "miss"
@@ -820,18 +822,22 @@ def compute_parlay_summary(weeks):
             outcome = "push"
         else:
             outcome = "pending"
-        if outcome in ("hit", "miss"):
-            parlays_decided += 1
-            if outcome == "hit":
-                parlays_hit += 1
         for l in legs:
             mgr = l.get("manager", "Unknown")
             st = manager_stats.setdefault(mgr, {"hits": 0, "misses": 0, "pushes": 0, "pending": 0})
             r = l.get("result")
-            if r == "hit": st["hits"] += 1
-            elif r == "miss": st["misses"] += 1
-            elif r == "push": st["pushes"] += 1
-            else: st["pending"] += 1
+            if r == "hit":
+                st["hits"] += 1
+                totals["hits"] += 1
+            elif r == "miss":
+                st["misses"] += 1
+                totals["misses"] += 1
+            elif r == "push":
+                st["pushes"] += 1
+                totals["pushes"] += 1
+            else:
+                st["pending"] += 1
+                totals["pending"] += 1
             if r in ("hit", "miss"):
                 manager_decided_seq.setdefault(mgr, []).append(r)
         weekly.append({"season": wk.get("season"), "week": wk.get("week"), "legs": legs, "outcome": outcome})
@@ -860,7 +866,14 @@ def compute_parlay_summary(weeks):
         best_streak = _best_streak(manager_decided_seq.get(mgr, []))
         leaderboard.append({"manager": mgr, **st, "rate": round(rate, 1), "decided": decided, "best_streak": best_streak})
     leaderboard.sort(key=lambda x: (-x["rate"], -x["decided"]))
-    return {"weekly": weekly, "leaderboard": leaderboard, "parlays_hit": parlays_hit, "parlays_decided": parlays_decided}
+    return {
+        "weekly": weekly,
+        "leaderboard": leaderboard,
+        "total_hits": totals["hits"],
+        "total_misses": totals["misses"],
+        "total_pushes": totals["pushes"],
+        "total_pending": totals["pending"],
+    }
 
 
 def compute_transaction_counts(league_id, max_week):
@@ -1582,6 +1595,21 @@ def build_model():
             key=lambda p: p["name"],
         )
 
+    # ---- every player rostered ANYWHERE in the league, for the Weekly Parlay
+    # pick dropdown: a leg can be on any player, not just one from the
+    # submitting manager's own team. Deduped by name (a player can only be on
+    # one roster, but this is cheap insurance against display-name overlaps).
+    all_players_by_name = {}
+    for t in teams.values():
+        for pid in t.get("players", []):
+            name = player_display(pid)
+            if name and name not in all_players_by_name:
+                all_players_by_name[name] = {
+                    "name": name,
+                    "pos": (get_players().get(str(pid)) or {}).get("position", ""),
+                }
+    all_players = sorted(all_players_by_name.values(), key=lambda p: p["name"])
+
     return {
         "league_name": league_name, "platform": "Sleeper", "season": season,
         "current_week": current_week, "season_not_started": season_not_started,
@@ -1592,6 +1620,7 @@ def build_model():
         "roster_ages": roster_ages, "player_tenure": player_tenure,
         "draft_capital": draft_capital, "trade_log": trade_log, "h2h": h2h_lookup,
         "stat_superlatives": stat_superlatives, "manager_rosters": manager_rosters,
+        "all_players": all_players,
     }
 
 
@@ -1947,13 +1976,15 @@ function escHtml(s){
   return String(s == null ? '' : s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
 }
 function populatePickSelect(pickEl, manager, currentPick){
-  // Fills a "pick" <select> with the chosen manager's current active roster.
-  // If currentPick doesn't match anyone currently on that roster (they were
-  // traded/dropped since this leg was submitted), it's still added as a
-  // selected-but-labeled option so editing an old week never silently
-  // blanks out what was actually picked.
+  // Fills a "pick" <select> with EVERY player rostered anywhere in the
+  // league (window.ALL_PLAYERS) — a parlay leg can be on any player, not
+  // just one from the submitted manager's own team. The manager argument
+  // is kept only for signature compatibility. If currentPick isn't
+  // currently rostered by any team (traded/dropped since the leg was
+  // submitted), it's still added as a selected-but-labeled option so
+  // editing an old week never silently blanks out what was picked.
   if (!pickEl) return;
-  var roster = (window.MANAGER_ROSTERS && window.MANAGER_ROSTERS[manager]) || [];
+  var roster = window.ALL_PLAYERS || [];
   var seen = false;
   var opts = roster.map(function(p){
     if (p.name === currentPick) seen = true;
@@ -1963,7 +1994,7 @@ function populatePickSelect(pickEl, manager, currentPick){
   if (currentPick && !seen) {
     opts += '<option value="' + escHtml(currentPick) + '" selected>' + escHtml(currentPick) + ' (not on current roster)</option>';
   }
-  pickEl.innerHTML = '<option value="">' + (manager ? 'Select player…' : 'Select manager first…') + '</option>' + opts;
+  pickEl.innerHTML = '<option value="">Select player…</option>' + opts;
 }
 function updateParlayProgress(prefix){
   var wrap = document.getElementById(prefix === 'px' ? 'parlayLegRows' : 'shLegRows');
@@ -2345,17 +2376,28 @@ function pqRenderHistory(legs){
   var weeksSorted = Object.keys(byWeek).map(function(k){ return byWeek[k]; })
     .sort(function(a,b){ return (b.season - a.season) || (b.week - a.week); });
 
-  var parlaysHit = 0, parlaysDecided = 0;
+  // Season-wide leg totals: every hit/miss/push across ALL weeks combined,
+  // independent of which week or manager submitted them. Pushes are neutral
+  // and left out of the hit-rate denominator.
+  var totalHits = 0, totalMisses = 0, totalPushes = 0;
+  legs.forEach(function(l){
+    if (l.result === 'hit') totalHits++;
+    else if (l.result === 'miss') totalMisses++;
+    else if (l.result === 'push') totalPushes++;
+  });
+  var decidedLegs = totalHits + totalMisses;
+  var legRate = decidedLegs ? Math.round((totalHits / decidedLegs) * 1000) / 10 : null;
   var managerStats = {};
   weeksSorted.forEach(function(w){
     var results = w.legs.map(function(l){ return l.result; });
     // A pushed leg is voided: the week is a miss if any leg missed, a hit if every
     // NON-push leg hit, a push if every leg pushed, otherwise still pending.
+    // (Used only for the per-week slip badge — the season record itself is
+    // now combined leg totals, not perfect weeks.)
     var live = results.filter(function(r){ return r !== 'push'; });
     w.outcome = results.some(function(r){ return r === 'miss'; }) ? 'miss'
       : (live.length && live.every(function(r){ return r === 'hit'; }) ? 'hit'
       : (results.length && !live.length ? 'push' : 'pending'));
-    if (w.outcome === 'hit' || w.outcome === 'miss'){ parlaysDecided++; if (w.outcome === 'hit') parlaysHit++; }
     w.legs.forEach(function(l){
       var st = managerStats[l.manager] = managerStats[l.manager] || {manager: l.manager, hits: 0, misses: 0, pushes: 0};
       if (l.result === 'hit') st.hits++;
@@ -2384,11 +2426,10 @@ function pqRenderHistory(legs){
     });
     return best;
   }
-  var rate = parlaysDecided ? Math.round((parlaysHit / parlaysDecided) * 100) : 0;
   heroEl.innerHTML =
     '<div class="parlay-summary-hero">' +
-      '<div class="parlay-summary-stat"><div class="psnum">' + parlaysHit + '-' + (parlaysDecided - parlaysHit) + '</div><div class="pslbl">Season Record</div></div>' +
-      '<div class="parlay-summary-stat"><div class="psnum">' + rate + '%</div><div class="pslbl">Perfect-Week Rate</div></div>' +
+      '<div class="parlay-summary-stat"><div class="psnum">' + totalHits + '-' + totalMisses + '-' + totalPushes + '</div><div class="pslbl">Record (Hit-Miss-Push)</div></div>' +
+      '<div class="parlay-summary-stat"><div class="psnum">' + (legRate == null ? '&mdash;' : legRate + '%') + '</div><div class="pslbl">Hit Rate</div></div>' +
       '<div class="parlay-summary-stat"><div class="psnum">' + weeksSorted.length + '</div><div class="pslbl">Weeks Tracked</div></div>' +
     '</div>';
 
@@ -2869,6 +2910,7 @@ def render_parlay_firebase(model):
     picks — see FIREBASE_SETUP.md for the one-time setup.
     """
     manager_rosters_json = json.dumps(model.get('manager_rosters', {}))
+    all_players_json = json.dumps(model.get('all_players', []))
     firebase_config_json = json.dumps(json.loads(FIREBASE_CONFIG)) if FIREBASE_CONFIG else "null"
     return f"""<h2 class="section-title">Weekly Parlay</h2>
     <div id="pqStatus" class="section-note">Loading&hellip;</div>
@@ -2912,6 +2954,7 @@ def render_parlay_firebase(model):
     <script>
       window.FIREBASE_CONFIG = {firebase_config_json};
       window.MANAGER_ROSTERS = {manager_rosters_json};
+      window.ALL_PLAYERS = {all_players_json};
       window.PQ_CURRENT_SEASON = {model['season']};
     </script>"""
 
@@ -2937,11 +2980,11 @@ def render_parlay_local(weeks, model):
     summary = compute_parlay_summary(weeks)
     header = "<h2 class='section-title'>Weekly Parlay</h2>"
     if summary:
-        decided = summary["parlays_decided"]
-        rate = (summary["parlays_hit"] / decided * 100) if decided else 0
+        decided_legs = summary["total_hits"] + summary["total_misses"]  # pushes are neutral, not in the hit-rate denominator
+        rate = (summary["total_hits"] / decided_legs * 100) if decided_legs else 0
         header += f"""<div class="parlay-summary-hero">
-          <div class="parlay-summary-stat"><div class="psnum">{summary['parlays_hit']}-{decided - summary['parlays_hit']}</div><div class="pslbl">Season Record</div></div>
-          <div class="parlay-summary-stat"><div class="psnum">{rate:.0f}%</div><div class="pslbl">Perfect-Week Rate</div></div>
+          <div class="parlay-summary-stat"><div class="psnum">{summary['total_hits']}-{summary['total_misses']}-{summary['total_pushes']}</div><div class="pslbl">Record (Hit-Miss-Push)</div></div>
+          <div class="parlay-summary-stat"><div class="psnum">{rate:.0f}%</div><div class="pslbl">Hit Rate</div></div>
           <div class="parlay-summary-stat"><div class="psnum">{len(summary['weekly'])}</div><div class="pslbl">Weeks Tracked</div></div>
         </div>"""
 
@@ -2979,6 +3022,7 @@ def render_parlay_local(weeks, model):
         body_html = ""
 
     manager_rosters_json = json.dumps(model.get('manager_rosters', {}))
+    all_players_json = json.dumps(model.get('all_players', []))
     parlay_json = json.dumps(weeks)
 
     entry_form = f"""
@@ -3006,6 +3050,7 @@ def render_parlay_local(weeks, model):
     </div>
     <script>
       window.MANAGER_ROSTERS = {manager_rosters_json};
+      window.ALL_PLAYERS = {all_players_json};
       window.PARLAY_DATA = {parlay_json};
       window.PARLAY_FILE_NAME = {json.dumps(PARLAY_FILE)};
     </script>"""
